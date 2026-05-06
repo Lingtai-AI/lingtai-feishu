@@ -8,7 +8,28 @@ This is the canonical setup, configuration, and troubleshooting doc for the `lin
 
 ## Tools
 
-One omnibus MCP tool: `feishu(action=...)`. Actions: `send`, `check`, `read`, `reply`, `search`, `contacts`, `add_contact`, `remove_contact`, `accounts`. Compound message IDs: `account_alias:chat_id:feishu_message_id`.
+One omnibus MCP tool: `feishu(action=...)`. Actions: `send`, `check`, `read`, `reply`, `search`, `delete`, `edit`, `contacts`, `add_contact`, `remove_contact`, `accounts`. Compound message IDs: `account_alias:chat_id:feishu_message_id`.
+
+### Voice Messages
+
+Audio/voice messages received from Feishu are automatically:
+1. Downloaded via the Feishu file resource API
+2. Transcribed locally using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (no external API key needed)
+3. Delivered as text in the LICC inbox event
+
+Voice transcription requires the `voice` extra:
+```bash
+pip install lingtai-feishu[voice]
+```
+
+The transcript replaces the empty text in the payload, and metadata includes `is_voice_transcript: true`, `voice_duration`, and `voice_transcript` (with language, segments, etc.).
+
+### Rich Feedback
+
+- **Seen reaction**: When a message is received, the bot adds an "OK" emoji reaction (✅) to acknowledge receipt.
+- **Done reaction**: After sending a reply, the bot adds a "THUMBSUP" emoji reaction (👍) to the original message.
+- **Typing indicator**: A temporary "⏳ ..." message is sent immediately on message receipt and automatically deleted when the agent's response is sent.
+- **Placeholder mode**: Send a placeholder message immediately and edit it later with the final content. Use `feishu(action="send", placeholder=true, ...)` to get back a compound message_id, then `feishu(action="edit", message_id=..., text=<final>)` to update it.
 
 ## Inbound messages (LICC)
 
@@ -81,6 +102,9 @@ Then run `system(action="refresh")` from the agent. The MCP subprocess starts, t
 - **`Feishu config not found`** — the path resolves but no file exists. Relative paths are resolved against `LINGTAI_AGENT_DIR`.
 - **`coroutine 'Client._connect' was never awaited` warning** — usually means invalid `app_id`/`app_secret`. The lark SDK fails the WebSocket handshake; tool calls still work for actions that don't require live connection (like `accounts`, `check` of cached state).
 - **Server boots but no inbound messages** — your app needs `im:message` and `im:message:send_as_bot` scopes in the Feishu Open Platform console. After enabling, re-publish the version.
+- **Voice messages arrive but aren't transcribed** — ensure `faster-whisper` is installed (`pip install lingtai-feishu[voice]`). Also check that your app has the `im:resource` scope for downloading message resources.
+- **Reactions fail silently** — your app needs `im:message.reactions:write` scope. Check logs for "Failed to add" warnings.
+- **Edit/delete actions return errors** — your app needs `im:message:patch` (edit) and/or `im:message:delete` scopes respectively.
 - **MCP server failed to start** — usually the `command` path in `init.json` doesn't have `lingtai_feishu` installed. Confirm with `<command> -m lingtai_feishu --help` from a shell.
 - **Tool calls return `Feishu manager not initialized`** — server boot failed (most often a malformed config). Check stderr.
 
