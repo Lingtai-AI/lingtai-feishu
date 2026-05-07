@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lingtai-feishu"
-version = "0.1.0"
+version = "0.2.0"
 description = "LingTai Feishu/Lark MCP server — message API client with LICC inbox callback."
 readme = "README.md"
 license = { text = "MIT" }
