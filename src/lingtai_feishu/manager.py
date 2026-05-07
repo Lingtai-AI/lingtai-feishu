@@ -91,10 +91,31 @@ class TypingIndicatorManager:
                 log.debug("Failed to delete typing message for %s:%s: %s",
                           account.alias, chat_id, e)
 
-    def stop_all(self) -> None:
-        """Stop all typing indicators. Called on shutdown."""
+    def stop_all(self, accounts: dict | None = None) -> None:
+        """Stop all typing indicators and delete temp messages.
+
+        Args:
+            accounts: Optional dict of alias -> FeishuAccount for cleanup.
+                      If provided, temp messages are deleted before clearing.
+                      If None, just clears the tracking dict (best-effort).
+        """
         with self._lock:
+            chats = dict(self._active_chats)
             self._active_chats.clear()
+
+        if accounts:
+            for (alias, _chat_id), info in chats.items():
+                msg_id = info.get("message_id")
+                if msg_id:
+                    acct = accounts.get(alias)
+                    if acct:
+                        try:
+                            acct.delete_message(msg_id)
+                        except Exception as e:
+                            log.debug(
+                                "Failed to delete typing message %s on shutdown: %s",
+                                msg_id, e,
+                            )
 
 
 # Global typing indicator manager
@@ -326,6 +347,14 @@ class FeishuManager:
         self._service.start()
 
     def stop(self) -> None:
+        # Clean up any orphan typing indicator messages before stopping
+        try:
+            _typing_manager.stop_all(
+                {alias: self._service.get_account(alias)
+                 for alias in self._service.list_accounts()}
+            )
+        except Exception:
+            pass
         self._service.stop()
 
     # ------------------------------------------------------------------
@@ -730,45 +759,54 @@ class FeishuManager:
             }
 
         acct = self._service.get_account(account)
-        result = acct.send_text(receive_id, receive_id_type, text)
+        # chat_id for typing cleanup — resolved after send, but if
+        # receive_id_type is "chat_id" we already know it.
+        chat_id: str = receive_id if receive_id_type == "chat_id" else ""
 
-        self._last_sent[dup_key] = count + 1
+        try:
+            result = acct.send_text(receive_id, receive_id_type, text)
 
-        feishu_msg_id = result.get("message_id", "")
-        chat_id = result.get("chat_id", receive_id)
-        compound_id = f"{account}:{chat_id}:{feishu_msg_id}"
-        sent_uuid = str(uuid4())
-        sent_dir = self._account_dir(account) / "sent" / sent_uuid
-        sent_dir.mkdir(parents=True, exist_ok=True)
-        sent_record = {
-            "id": compound_id,
-            "feishu_message_id": feishu_msg_id,
-            "to": {"receive_id": receive_id, "receive_id_type": receive_id_type},
-            "chat_id": chat_id,
-            "text": text,
-            "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "status": "placeholder" if placeholder else "sent",
-        }
-        (sent_dir / "message.json").write_text(
-            json.dumps(sent_record, indent=2, default=str),
-            encoding="utf-8",
-        )
+            self._last_sent[dup_key] = count + 1
 
-        response: dict[str, Any] = {
-            "status": "sent",
-            "message_id": compound_id,
-        }
-        if placeholder:
-            response["placeholder"] = True
-            response["hint"] = (
-                f"Placeholder sent — call feishu(action='edit', "
-                f"message_id='{compound_id}', text=<final>) when ready."
+            feishu_msg_id = result.get("message_id", "")
+            chat_id = result.get("chat_id", receive_id)
+            compound_id = f"{account}:{chat_id}:{feishu_msg_id}"
+            sent_uuid = str(uuid4())
+            sent_dir = self._account_dir(account) / "sent" / sent_uuid
+            sent_dir.mkdir(parents=True, exist_ok=True)
+            sent_record = {
+                "id": compound_id,
+                "feishu_message_id": feishu_msg_id,
+                "to": {"receive_id": receive_id, "receive_id_type": receive_id_type},
+                "chat_id": chat_id,
+                "text": text,
+                "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "status": "placeholder" if placeholder else "sent",
+            }
+            (sent_dir / "message.json").write_text(
+                json.dumps(sent_record, indent=2, default=str),
+                encoding="utf-8",
             )
 
-        # Rich feedback: Stop typing indicator now that response is sent
-        _typing_manager.stop_typing(acct, chat_id)
+            response: dict[str, Any] = {
+                "status": "sent",
+                "message_id": compound_id,
+            }
+            if placeholder:
+                response["placeholder"] = True
+                response["hint"] = (
+                    f"Placeholder sent — call feishu(action='edit', "
+                    f"message_id='{compound_id}', text=<final>) when ready."
+                )
 
-        return response
+            return response
+        finally:
+            # Always clean up typing indicator, even if send_text or
+            # downstream logic throws. For chat_id-type receives we
+            # already know the key; for open_id we get it from the result
+            # (or fall back to receive_id if send failed).
+            if chat_id:
+                _typing_manager.stop_typing(acct, chat_id)
 
     def _check(self, args: dict) -> dict:
         account = self._resolve_account(args)
@@ -846,38 +884,42 @@ class FeishuManager:
 
         alias, _chat_id, feishu_msg_id = self._parse_compound_id(compound_id)
         acct = self._service.get_account(alias)
-        result = acct.reply_text(feishu_msg_id, text)
 
-        new_msg_id = result.get("message_id", "")
-        new_chat_id = result.get("chat_id", _chat_id)
-        new_compound = f"{alias}:{new_chat_id}:{new_msg_id}"
-        sent_uuid = str(uuid4())
-        sent_dir = self._account_dir(alias) / "sent" / sent_uuid
-        sent_dir.mkdir(parents=True, exist_ok=True)
-        sent_record = {
-            "id": new_compound,
-            "feishu_message_id": new_msg_id,
-            "reply_to": compound_id,
-            "chat_id": new_chat_id,
-            "text": text,
-            "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "status": "sent",
-        }
-        (sent_dir / "message.json").write_text(
-            json.dumps(sent_record, indent=2, default=str),
-            encoding="utf-8",
-        )
-
-        # Rich feedback: Add "done" reaction (THUMBSUP) to the original message
         try:
-            acct.add_reaction(feishu_msg_id, REACTION_DONE)
-        except Exception as e:
-            log.debug("Failed to add 'done' reaction: %s", e)
+            result = acct.reply_text(feishu_msg_id, text)
 
-        # Rich feedback: Stop typing indicator
-        _typing_manager.stop_typing(acct, new_chat_id)
+            new_msg_id = result.get("message_id", "")
+            new_chat_id = result.get("chat_id", _chat_id)
+            new_compound = f"{alias}:{new_chat_id}:{new_msg_id}"
+            sent_uuid = str(uuid4())
+            sent_dir = self._account_dir(alias) / "sent" / sent_uuid
+            sent_dir.mkdir(parents=True, exist_ok=True)
+            sent_record = {
+                "id": new_compound,
+                "feishu_message_id": new_msg_id,
+                "reply_to": compound_id,
+                "chat_id": new_chat_id,
+                "text": text,
+                "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "status": "sent",
+            }
+            (sent_dir / "message.json").write_text(
+                json.dumps(sent_record, indent=2, default=str),
+                encoding="utf-8",
+            )
 
-        return {"status": "sent", "message_id": new_compound}
+            # Rich feedback: Add "done" reaction (THUMBSUP) to the original message
+            try:
+                acct.add_reaction(feishu_msg_id, REACTION_DONE)
+            except Exception as e:
+                log.debug("Failed to add 'done' reaction: %s", e)
+
+            return {"status": "sent", "message_id": new_compound}
+        finally:
+            # Always clean up typing indicator, even if reply_text or
+            # downstream logic throws. _chat_id comes from parsing the
+            # compound_id so it's always available.
+            _typing_manager.stop_typing(acct, _chat_id)
 
     def _search(self, args: dict) -> dict:
         query = args.get("query", "")
