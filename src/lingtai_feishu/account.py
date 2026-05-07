@@ -229,6 +229,149 @@ class FeishuAccount:
         }
 
     # ------------------------------------------------------------------
+    # File download (voice, audio, images, documents)
+    # ------------------------------------------------------------------
+
+    def get_message_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        resource_type: str = "file",
+    ) -> tuple[str, bytes]:
+        """Download a resource file from a message.
+
+        Args:
+            message_id: Feishu message ID (om_xxx).
+            file_key: The file_key from the message content.
+            resource_type: "file", "image", or "video".
+
+        Returns:
+            (filename, content_bytes) tuple.
+        """
+        from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+        request = (
+            GetMessageResourceRequest.builder()
+            .message_id(message_id)
+            .file_key(file_key)
+            .type(resource_type)
+            .build()
+        )
+        response = self._rest_client.im.v1.message_resource.get(request)
+        if not response.success():
+            raise RuntimeError(
+                f"Feishu get_message_resource failed: "
+                f"code={response.code} msg={response.msg}"
+            )
+        filename = response.file_name or f"{file_key}.ogg"
+        content = response.file.read()
+        return filename, content
+
+    # ------------------------------------------------------------------
+    # Reactions (emoji responses on messages)
+    # ------------------------------------------------------------------
+
+    def add_reaction(self, message_id: str, emoji_type: str) -> bool:
+        """Add an emoji reaction to a message.
+
+        Args:
+            message_id: Feishu message ID (om_xxx).
+            emoji_type: Emoji type string (e.g. "OK", "THUMBSUP", "SMILE").
+
+        Returns:
+            True on success.
+        """
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+        )
+
+        request = (
+            CreateMessageReactionRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                CreateMessageReactionRequestBody.builder()
+                .reaction_type(
+                    Emoji.builder().emoji_type(emoji_type).build()
+                )
+                .build()
+            )
+            .build()
+        )
+        response = self._rest_client.im.v1.message_reaction.create(request)
+        if not response.success():
+            raise RuntimeError(
+                f"Feishu add_reaction failed: "
+                f"code={response.code} msg={response.msg}"
+            )
+        return True
+
+    # ------------------------------------------------------------------
+    # Message editing & deletion
+    # ------------------------------------------------------------------
+
+    def update_message(self, message_id: str, text: str) -> dict:
+        """Edit a sent text message with new content.
+
+        Uses the PATCH endpoint to update message content.
+        Only text messages can be edited this way.
+
+        Args:
+            message_id: Feishu message ID (om_xxx).
+            text: New text content.
+
+        Returns:
+            Response dict (empty on success since PATCH returns no body).
+        """
+        from lark_oapi.api.im.v1 import (
+            PatchMessageRequest,
+            PatchMessageRequestBody,
+        )
+
+        request = (
+            PatchMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                PatchMessageRequestBody.builder()
+                .content(json.dumps({"text": text}))
+                .build()
+            )
+            .build()
+        )
+        response = self._rest_client.im.v1.message.patch(request)
+        if not response.success():
+            raise RuntimeError(
+                f"Feishu update_message failed: "
+                f"code={response.code} msg={response.msg}"
+            )
+        return {}
+
+    def delete_message(self, message_id: str) -> bool:
+        """Delete a message sent by the bot.
+
+        Args:
+            message_id: Feishu message ID (om_xxx).
+
+        Returns:
+            True on success.
+        """
+        from lark_oapi.api.im.v1 import DeleteMessageRequest
+
+        request = (
+            DeleteMessageRequest.builder()
+            .message_id(message_id)
+            .build()
+        )
+        response = self._rest_client.im.v1.message.delete(request)
+        if not response.success():
+            raise RuntimeError(
+                f"Feishu delete_message failed: "
+                f"code={response.code} msg={response.msg}"
+            )
+        return True
+
+    # ------------------------------------------------------------------
     # State persistence
     # ------------------------------------------------------------------
 

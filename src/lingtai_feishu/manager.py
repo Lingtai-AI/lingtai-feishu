@@ -15,16 +15,167 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import Any, Callable, TYPE_CHECKING
 from uuid import uuid4
 
 if TYPE_CHECKING:
     from .service import FeishuService
 
 log = logging.getLogger(__name__)
+
+# Emoji reactions for different states
+# Feishu supported emoji types: OK, THUMBSUP, SMILE, HEART, THANKS, etc.
+REACTION_SEEN = "OK"        # Message received — "got it"
+REACTION_DONE = "THUMBSUP"  # Response sent — "done"
+
+
+class TypingIndicatorManager:
+    """Manages automatic typing feedback for Feishu chats.
+
+    Since Feishu has no native typing indicator API (unlike Telegram's
+    sendChatAction), this sends a temporary "typing..." message that is
+    deleted when the response is ready. Best-effort — never blocks or fails.
+    """
+
+    def __init__(self) -> None:
+        self._active_chats: dict[tuple[str, str], dict] = {}
+        self._lock = threading.Lock()
+
+    def start_typing(
+        self, account: Any, chat_id: str, receive_id: str, receive_id_type: str,
+    ) -> str | None:
+        """Send a typing feedback message. Returns the feishu_message_id of the
+        temporary message, or None on failure.
+
+        Args:
+            account: FeishuAccount instance.
+            chat_id: The chat_id to associate the typing message with.
+            receive_id: The receive_id (open_id or chat_id) for sending.
+            receive_id_type: "open_id" or "chat_id".
+        """
+        key = (account.alias, chat_id)
+        with self._lock:
+            if key in self._active_chats:
+                return None  # Already typing
+            try:
+                result = account.send_text(
+                    receive_id, receive_id_type, "⏳ ...",
+                )
+                msg_id = result.get("message_id", "")
+                self._active_chats[key] = {
+                    "message_id": msg_id,
+                    "receive_id": receive_id,
+                    "receive_id_type": receive_id_type,
+                }
+                return msg_id
+            except Exception as e:
+                log.debug("Typing indicator failed for %s:%s: %s",
+                          account.alias, chat_id, e)
+                return None
+
+    def stop_typing(self, account: Any, chat_id: str) -> None:
+        """Delete the typing feedback message for a chat."""
+        key = (account.alias, chat_id)
+        with self._lock:
+            info = self._active_chats.pop(key, None)
+        if info and info.get("message_id"):
+            try:
+                account.delete_message(info["message_id"])
+            except Exception as e:
+                log.debug("Failed to delete typing message for %s:%s: %s",
+                          account.alias, chat_id, e)
+
+    def stop_all(self, accounts: dict | None = None) -> None:
+        """Stop all typing indicators and delete temp messages.
+
+        Args:
+            accounts: Optional dict of alias -> FeishuAccount for cleanup.
+                      If provided, temp messages are deleted before clearing.
+                      If None, just clears the tracking dict (best-effort).
+        """
+        with self._lock:
+            chats = dict(self._active_chats)
+            self._active_chats.clear()
+
+        if accounts:
+            for (alias, _chat_id), info in chats.items():
+                msg_id = info.get("message_id")
+                if msg_id:
+                    acct = accounts.get(alias)
+                    if acct:
+                        try:
+                            acct.delete_message(msg_id)
+                        except Exception as e:
+                            log.debug(
+                                "Failed to delete typing message %s on shutdown: %s",
+                                msg_id, e,
+                            )
+
+
+# Global typing indicator manager
+_typing_manager = TypingIndicatorManager()
+
+
+# Module-level cache for WhisperModel instances to avoid reloading weights
+_whisper_model_cache: dict[str, Any] = {}
+
+
+def _get_whisper_model(model_name: str) -> Any:
+    """Get or create a cached WhisperModel instance."""
+    if model_name not in _whisper_model_cache:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            # Install faster-whisper
+            log.warning("faster-whisper not installed, attempting auto-install...")
+            subprocess.check_call([
+                sys.executable, "-m", "pip", "install", "faster-whisper"
+            ])
+            from faster_whisper import WhisperModel
+        _whisper_model_cache[model_name] = WhisperModel(
+            model_name, device="cpu", compute_type="int8"
+        )
+    return _whisper_model_cache[model_name]
+
+
+def _transcribe_voice(audio_path: str, model_name: str = "base") -> dict:
+    """Transcribe a voice/audio file using faster-whisper.
+
+    Returns a dict with 'text' (transcript) and metadata, or an error dict.
+    Uses cached WhisperModel to avoid reloading weights on every call.
+    """
+    try:
+        whisper_model = _get_whisper_model(model_name)
+        segments_iter, info = whisper_model.transcribe(audio_path)
+        segments_list = list(segments_iter)
+
+        transcript_segments = []
+        for seg in segments_list:
+            entry = {
+                "start": round(seg.start, 2),
+                "end": round(seg.end, 2),
+                "text": seg.text.strip(),
+            }
+            transcript_segments.append(entry)
+
+        full_text = " ".join(s["text"] for s in transcript_segments).strip()
+
+        return {
+            "text": full_text,
+            "language": info.language,
+            "language_probability": round(info.language_probability, 3),
+            "duration": round(info.duration, 2),
+            "segments": transcript_segments,
+        }
+    except Exception as e:
+        log.warning("Voice transcription failed: %s", e)
+        return {"error": str(e)}
 
 SCHEMA = {
     "type": "object",
@@ -33,12 +184,16 @@ SCHEMA = {
             "type": "string",
             "enum": [
                 "send", "check", "read", "reply", "search",
+                "delete", "edit",
                 "contacts", "add_contact", "remove_contact",
                 "accounts",
             ],
             "description": (
                 "send: send a text message to a user or chat "
-                "(receive_id, receive_id_type, text; optional account). "
+                "(receive_id, receive_id_type, text; optional account, placeholder). "
+                "If placeholder is true, sends text as a placeholder message "
+                "immediately and returns its compound message_id so the agent "
+                "can call edit later with the final result. "
                 "check: list recent conversations with unread counts "
                 "(optional account). "
                 "read: read messages from a specific chat "
@@ -47,6 +202,8 @@ SCHEMA = {
                 "(message_id from read results, text). "
                 "search: search inbox messages by regex "
                 "(query; optional account, chat_id). "
+                "delete: delete a bot message (message_id). "
+                "edit: edit a bot message (message_id, text). "
                 "contacts: list saved contacts (optional account). "
                 "add_contact: save a contact "
                 "(open_id, alias; optional name, chat_id). "
@@ -112,6 +269,17 @@ SCHEMA = {
             "type": "string",
             "description": "Display name for a contact",
         },
+        "placeholder": {
+            "type": "boolean",
+            "description": (
+                "send only — send 'text' as a placeholder message immediately "
+                "and return its compound message_id so the agent can call "
+                "edit later with the final result. "
+                "Use for long-running responses (>5s) to avoid the perception "
+                "of silence."
+            ),
+            "default": False,
+        },
     },
     "required": ["action"],
 }
@@ -128,8 +296,15 @@ DESCRIPTION = (
     "'read' to read messages from a specific chat (returns compound message IDs). "
     "'reply' to respond to a message (use compound ID from read results). "
     "'search' to find messages by keyword or regex. "
+    "'delete' to delete a bot message (message_id). "
+    "'edit' to edit a sent message (message_id, text). "
     "'contacts' to manage saved contacts (open_id aliases). "
-    "'accounts' to list configured app accounts."
+    "'accounts' to list configured app accounts. "
+    "Voice/audio messages are automatically transcribed using Whisper (local) "
+    "and delivered as text. "
+    "Rich feedback: automatic 'seen' emoji reaction (OK) on message receipt, "
+    "'done' emoji reaction (THUMBSUP) after response is sent, "
+    "and placeholder messages for long-running tasks."
 )
 
 
@@ -172,6 +347,14 @@ class FeishuManager:
         self._service.start()
 
     def stop(self) -> None:
+        # Clean up any orphan typing indicator messages before stopping
+        try:
+            _typing_manager.stop_all(
+                {alias: self._service.get_account(alias)
+                 for alias in self._service.list_accounts()}
+            )
+        except Exception:
+            pass
         self._service.stop()
 
     # ------------------------------------------------------------------
@@ -191,6 +374,10 @@ class FeishuManager:
                 return self._reply(args)
             elif action == "search":
                 return self._search(args)
+            elif action == "delete":
+                return self._delete(args)
+            elif action == "edit":
+                return self._edit(args)
             elif action == "contacts":
                 return self._contacts(args)
             elif action == "add_contact":
@@ -232,12 +419,47 @@ class FeishuManager:
                 (getattr(sender_id, "open_id", "") or "") if sender_id else ""
             )
 
+            # Parse content based on message type
             text = ""
+            media_info: dict | None = None
+            content_data: dict = {}
             try:
                 content_data = json.loads(content_str)
-                text = content_data.get("text", "")
             except (json.JSONDecodeError, AttributeError):
-                text = content_str
+                content_data = {}
+
+            if msg_type == "text":
+                text = content_data.get("text", "")
+            elif msg_type == "audio":
+                # Audio/voice message — will be transcribed below
+                text = ""
+            elif msg_type == "image":
+                text = content_data.get("text", "") or "[Image]"
+            elif msg_type == "file":
+                text = content_data.get("text", "") or "[File]"
+            elif msg_type == "sticker":
+                text = "[Sticker]"
+            elif msg_type == "interactive":
+                text = content_data.get("text", "") or "[Interactive card]"
+            elif msg_type == "post":
+                # Rich text — extract plain text from the post content
+                post_content = content_data.get("content", {})
+                title = content_data.get("title", "")
+                # Flatten the post content to extract text
+                text_parts = []
+                if title:
+                    text_parts.append(title)
+                if isinstance(post_content, dict):
+                    for _lang, paragraphs in post_content.items():
+                        if isinstance(paragraphs, list):
+                            for para in paragraphs:
+                                if isinstance(para, list):
+                                    for elem in para:
+                                        if isinstance(elem, dict) and elem.get("tag") == "text":
+                                            text_parts.append(elem.get("text", ""))
+                text = " ".join(text_parts).strip() or "[Rich text message]"
+            else:
+                text = content_data.get("text", "") or f"[{msg_type} message]"
 
             if create_time:
                 try:
@@ -264,12 +486,99 @@ class FeishuManager:
                 "text": text,
                 "date": date_str,
                 "parent_id": parent_id,
+                "media": None,
+                "voice_transcript": None,
             }
 
             msg_uuid = str(uuid4())
             acct_dir = self._account_dir(account_alias)
             msg_dir = acct_dir / "inbox" / msg_uuid
             msg_dir.mkdir(parents=True, exist_ok=True)
+
+            # Rich feedback: Add "seen" reaction (OK emoji) immediately
+            account = None
+            try:
+                account = self._service.get_account(account_alias)
+            except (KeyError, Exception) as e:
+                log.warning("Failed to get account %s for feedback: %s",
+                            account_alias, e)
+
+            if account and feishu_msg_id:
+                try:
+                    account.add_reaction(feishu_msg_id, REACTION_SEEN)
+                except Exception as e:
+                    log.debug("Failed to add 'seen' reaction: %s", e)
+
+            # Rich feedback: Start typing indicator
+            if account and chat_id:
+                # Determine receive_id for sending the typing indicator
+                if chat_type == "p2p":
+                    typing_receive_id = open_id
+                    typing_receive_id_type = "open_id"
+                else:
+                    typing_receive_id = chat_id
+                    typing_receive_id_type = "chat_id"
+                _typing_manager.start_typing(
+                    account, chat_id, typing_receive_id, typing_receive_id_type,
+                )
+
+            # Handle audio/voice messages: download and transcribe
+            if msg_type == "audio":
+                file_key = content_data.get("file_key", "")
+                if file_key and account:
+                    try:
+                        log.info("Downloading audio message %s (file_key=%s)",
+                                 feishu_msg_id, file_key)
+                        filename, audio_data = account.get_message_resource(
+                            feishu_msg_id, file_key, "file",
+                        )
+                        # Save to attachments directory
+                        att_dir = msg_dir / "attachments"
+                        att_dir.mkdir(parents=True, exist_ok=True)
+                        # Ensure proper audio extension
+                        if not any(filename.endswith(ext) for ext in
+                                   (".ogg", ".opus", ".mp3", ".wav", ".m4a")):
+                            filename = filename + ".ogg"
+                        filepath = att_dir / filename
+                        filepath.write_bytes(audio_data)
+                        media_info = {
+                            "type": "audio",
+                            "filename": filename,
+                            "path": str(filepath),
+                            "size": len(audio_data),
+                            "file_key": file_key,
+                        }
+                        payload["media"] = media_info
+
+                        # Transcribe with Whisper
+                        log.info("Transcribing voice message from %s (%s)",
+                                 account_alias, open_id)
+                        transcript = _transcribe_voice(str(filepath))
+                        if "error" not in transcript:
+                            text = transcript.get("text", "")
+                            payload["text"] = text
+                            payload["voice_transcript"] = {
+                                "text": text,
+                                "language": transcript.get("language"),
+                                "duration": transcript.get("duration"),
+                                "segments": transcript.get("segments"),
+                            }
+                            log.info("Voice transcription successful: %s chars",
+                                     len(text))
+                        else:
+                            text = (
+                                f"[Voice message received — transcription "
+                                f"failed: {transcript.get('error', 'unknown')}]"
+                            )
+                            payload["text"] = text
+                            log.warning("Voice transcription failed: %s",
+                                        transcript.get("error"))
+                    except Exception as e:
+                        log.warning("Audio download/transcription failed: %s", e)
+                        text = f"[Voice message received — processing failed: {e}]"
+                        payload["text"] = text
+
+            # Persist to disk
             (msg_dir / "message.json").write_text(
                 json.dumps(payload, indent=2, default=str),
                 encoding="utf-8",
@@ -298,11 +607,16 @@ class FeishuManager:
             account_alias, display_name, compound_id,
         )
 
+        # Enhance subject for voice messages
+        subject = f"feishu message from {display_name} via {account_alias}"
+        if payload.get("voice_transcript"):
+            subject = f"feishu voice message from {display_name} via {account_alias} (transcribed)"
+
         try:
             self._on_inbound({
                 "from": display_name,
-                "subject": f"feishu message from {display_name} via {account_alias}",
-                "body": preview if preview else "(no text — see media)",
+                "subject": subject,
+                "body": preview if preview else "(no text — see media or callback)",
                 "metadata": {
                     "message_id": compound_id,
                     "account": account_alias,
@@ -311,12 +625,21 @@ class FeishuManager:
                     "from_open_id": open_id,
                     "preview_truncated": len(text or "") > 300,
                     "full_length": len(text or ""),
+                    "has_media": payload.get("media") is not None,
+                    "is_voice_transcript": payload.get("voice_transcript") is not None,
+                    "voice_duration": (
+                        payload.get("voice_transcript", {}).get("duration")
+                        if payload.get("voice_transcript") else None
+                    ),
+                    "message_type": msg_type,
                 },
                 "wake": True,
             })
         except Exception as e:
             log.error("on_inbound callback failed for feishu msg %s: %s",
                       compound_id, e)
+        # Note: typing indicator continues until _send() is called by the agent.
+        # _send() stops typing when it sends the response.
 
     # ------------------------------------------------------------------
     # Filesystem helpers
@@ -420,6 +743,7 @@ class FeishuManager:
         receive_id = args.get("receive_id", "")
         receive_id_type = args.get("receive_id_type", "open_id")
         text = args.get("text", "")
+        placeholder = bool(args.get("placeholder", False))
 
         if not receive_id:
             return {"error": "receive_id is required"}
@@ -435,31 +759,54 @@ class FeishuManager:
             }
 
         acct = self._service.get_account(account)
-        result = acct.send_text(receive_id, receive_id_type, text)
+        # chat_id for typing cleanup — resolved after send, but if
+        # receive_id_type is "chat_id" we already know it.
+        chat_id: str = receive_id if receive_id_type == "chat_id" else ""
 
-        self._last_sent[dup_key] = count + 1
+        try:
+            result = acct.send_text(receive_id, receive_id_type, text)
 
-        feishu_msg_id = result.get("message_id", "")
-        chat_id = result.get("chat_id", receive_id)
-        compound_id = f"{account}:{chat_id}:{feishu_msg_id}"
-        sent_uuid = str(uuid4())
-        sent_dir = self._account_dir(account) / "sent" / sent_uuid
-        sent_dir.mkdir(parents=True, exist_ok=True)
-        sent_record = {
-            "id": compound_id,
-            "feishu_message_id": feishu_msg_id,
-            "to": {"receive_id": receive_id, "receive_id_type": receive_id_type},
-            "chat_id": chat_id,
-            "text": text,
-            "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "status": "sent",
-        }
-        (sent_dir / "message.json").write_text(
-            json.dumps(sent_record, indent=2, default=str),
-            encoding="utf-8",
-        )
+            self._last_sent[dup_key] = count + 1
 
-        return {"status": "sent", "message_id": compound_id}
+            feishu_msg_id = result.get("message_id", "")
+            chat_id = result.get("chat_id", receive_id)
+            compound_id = f"{account}:{chat_id}:{feishu_msg_id}"
+            sent_uuid = str(uuid4())
+            sent_dir = self._account_dir(account) / "sent" / sent_uuid
+            sent_dir.mkdir(parents=True, exist_ok=True)
+            sent_record = {
+                "id": compound_id,
+                "feishu_message_id": feishu_msg_id,
+                "to": {"receive_id": receive_id, "receive_id_type": receive_id_type},
+                "chat_id": chat_id,
+                "text": text,
+                "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "status": "placeholder" if placeholder else "sent",
+            }
+            (sent_dir / "message.json").write_text(
+                json.dumps(sent_record, indent=2, default=str),
+                encoding="utf-8",
+            )
+
+            response: dict[str, Any] = {
+                "status": "sent",
+                "message_id": compound_id,
+            }
+            if placeholder:
+                response["placeholder"] = True
+                response["hint"] = (
+                    f"Placeholder sent — call feishu(action='edit', "
+                    f"message_id='{compound_id}', text=<final>) when ready."
+                )
+
+            return response
+        finally:
+            # Always clean up typing indicator, even if send_text or
+            # downstream logic throws. For chat_id-type receives we
+            # already know the key; for open_id we get it from the result
+            # (or fall back to receive_id if send failed).
+            if chat_id:
+                _typing_manager.stop_typing(acct, chat_id)
 
     def _check(self, args: dict) -> dict:
         account = self._resolve_account(args)
@@ -521,6 +868,8 @@ class FeishuManager:
                 "text": m.get("text"),
                 "date": m.get("date"),
                 "parent_id": m.get("parent_id"),
+                "media": m.get("media"),
+                "voice_transcript": m.get("voice_transcript"),
             })
 
         return {"status": "ok", "messages": cleaned}
@@ -535,29 +884,42 @@ class FeishuManager:
 
         alias, _chat_id, feishu_msg_id = self._parse_compound_id(compound_id)
         acct = self._service.get_account(alias)
-        result = acct.reply_text(feishu_msg_id, text)
 
-        new_msg_id = result.get("message_id", "")
-        new_chat_id = result.get("chat_id", _chat_id)
-        new_compound = f"{alias}:{new_chat_id}:{new_msg_id}"
-        sent_uuid = str(uuid4())
-        sent_dir = self._account_dir(alias) / "sent" / sent_uuid
-        sent_dir.mkdir(parents=True, exist_ok=True)
-        sent_record = {
-            "id": new_compound,
-            "feishu_message_id": new_msg_id,
-            "reply_to": compound_id,
-            "chat_id": new_chat_id,
-            "text": text,
-            "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "status": "sent",
-        }
-        (sent_dir / "message.json").write_text(
-            json.dumps(sent_record, indent=2, default=str),
-            encoding="utf-8",
-        )
+        try:
+            result = acct.reply_text(feishu_msg_id, text)
 
-        return {"status": "sent", "message_id": new_compound}
+            new_msg_id = result.get("message_id", "")
+            new_chat_id = result.get("chat_id", _chat_id)
+            new_compound = f"{alias}:{new_chat_id}:{new_msg_id}"
+            sent_uuid = str(uuid4())
+            sent_dir = self._account_dir(alias) / "sent" / sent_uuid
+            sent_dir.mkdir(parents=True, exist_ok=True)
+            sent_record = {
+                "id": new_compound,
+                "feishu_message_id": new_msg_id,
+                "reply_to": compound_id,
+                "chat_id": new_chat_id,
+                "text": text,
+                "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "status": "sent",
+            }
+            (sent_dir / "message.json").write_text(
+                json.dumps(sent_record, indent=2, default=str),
+                encoding="utf-8",
+            )
+
+            # Rich feedback: Add "done" reaction (THUMBSUP) to the original message
+            try:
+                acct.add_reaction(feishu_msg_id, REACTION_DONE)
+            except Exception as e:
+                log.debug("Failed to add 'done' reaction: %s", e)
+
+            return {"status": "sent", "message_id": new_compound}
+        finally:
+            # Always clean up typing indicator, even if reply_text or
+            # downstream logic throws. _chat_id comes from parsing the
+            # compound_id so it's always available.
+            _typing_manager.stop_typing(acct, _chat_id)
 
     def _search(self, args: dict) -> dict:
         query = args.get("query", "")
@@ -593,6 +955,27 @@ class FeishuManager:
                 })
 
         return {"status": "ok", "total": len(matches), "messages": matches}
+
+    def _delete(self, args: dict) -> dict:
+        compound_id = args.get("message_id", "")
+        if not compound_id:
+            return {"error": "message_id is required"}
+        alias, _chat_id, feishu_msg_id = self._parse_compound_id(compound_id)
+        acct = self._service.get_account(alias)
+        acct.delete_message(feishu_msg_id)
+        return {"status": "deleted", "message_id": compound_id}
+
+    def _edit(self, args: dict) -> dict:
+        compound_id = args.get("message_id", "")
+        text = args.get("text", "")
+        if not compound_id:
+            return {"error": "message_id is required"}
+        if not text:
+            return {"error": "text is required"}
+        alias, _chat_id, feishu_msg_id = self._parse_compound_id(compound_id)
+        acct = self._service.get_account(alias)
+        acct.update_message(feishu_msg_id, text)
+        return {"status": "edited", "message_id": compound_id}
 
     def _contacts(self, args: dict) -> dict:
         account = self._resolve_account(args)
