@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "lingtai-feishu"
 version = "0.2.0"
-description = "LingTai Feishu/Lark MCP server — message API client with LICC inbox callback."
+description = "LingTai Feishu/Lark MCP server"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Zesen Huang", email = "hzsbazinga@outlook.com" }]
