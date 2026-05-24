@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -396,4 +398,16 @@ class FeishuAccount:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {"bot_info": self._bot_info}
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            os.write(fd, json.dumps(data, indent=2).encode("utf-8"))
+            os.close(fd)
+            os.replace(tmp, str(path))
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
