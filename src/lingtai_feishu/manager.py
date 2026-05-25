@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
@@ -354,6 +355,12 @@ class FeishuManager:
         # Duplicate send protection: (alias, receive_id, text) -> count
         self._last_sent: dict[tuple[str, str, str], int] = {}
         self._dup_free_passes = 2
+        # Incoming event dedupe: per-account FIFO of recently-seen
+        # feishu_message_id values. Protects against lark-oapi WS
+        # reconnect redelivery (issue #5). Bounded; oldest evicted first.
+        self._seen_msg_ids: dict[str, OrderedDict[str, None]] = {}
+        self._dedupe_lock = threading.Lock()
+        self._dedupe_limit = 1000
 
     def _account_dir(self, alias: str) -> Path:
         return self._working_dir / "feishu" / alias
@@ -425,6 +432,22 @@ class FeishuManager:
     # Incoming messages — called by FeishuService via on_message callback
     # ------------------------------------------------------------------
 
+    def _is_duplicate_event(self, account_alias: str, feishu_msg_id: str) -> bool:
+        """Record `feishu_msg_id` for `account_alias` and report whether
+        it was already seen. Bounded FIFO per account; oldest evicted.
+        """
+        with self._dedupe_lock:
+            seen = self._seen_msg_ids.get(account_alias)
+            if seen is None:
+                seen = OrderedDict()
+                self._seen_msg_ids[account_alias] = seen
+            if feishu_msg_id in seen:
+                return True
+            seen[feishu_msg_id] = None
+            while len(seen) > self._dedupe_limit:
+                seen.popitem(last=False)
+            return False
+
     def on_incoming(self, account_alias: str, data: object) -> None:
         """Persist an incoming Feishu message event to disk and notify agent."""
         try:
@@ -437,6 +460,14 @@ class FeishuManager:
                 return
 
             feishu_msg_id: str = getattr(message, "message_id", "") or ""
+            if feishu_msg_id and self._is_duplicate_event(
+                account_alias, feishu_msg_id,
+            ):
+                log.debug(
+                    "feishu dedupe: dropping replayed event %s on %s",
+                    feishu_msg_id, account_alias,
+                )
+                return
             chat_id: str = getattr(message, "chat_id", "") or ""
             chat_type: str = getattr(message, "chat_type", "p2p") or "p2p"
             msg_type: str = getattr(message, "message_type", "text") or "text"
