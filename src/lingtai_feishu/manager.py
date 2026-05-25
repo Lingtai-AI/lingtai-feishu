@@ -91,6 +91,36 @@ class TypingIndicatorManager:
                 log.debug("Failed to delete typing message for %s:%s: %s",
                           account.alias, chat_id, e)
 
+    def stop_typing_by_receive(
+        self, account: Any, receive_id: str, receive_id_type: str,
+    ) -> None:
+        """Fallback cleanup when the chat_id key isn't known.
+
+        Used by _send on p2p (open_id) sends that fail before the chat_id
+        comes back from the API, so the indicator started under the real
+        chat_id at receive-time still gets cleaned up. Best-effort and
+        non-failing.
+        """
+        with self._lock:
+            matching = [
+                key for key, info in self._active_chats.items()
+                if key[0] == account.alias
+                and info.get("receive_id") == receive_id
+                and info.get("receive_id_type") == receive_id_type
+            ]
+            removed = [(key, self._active_chats.pop(key)) for key in matching]
+        for key, info in removed:
+            msg_id = info.get("message_id")
+            if not msg_id:
+                continue
+            try:
+                account.delete_message(msg_id)
+            except Exception as e:
+                log.debug(
+                    "Failed to delete typing message for %s (receive_id=%s): %s",
+                    key, receive_id, e,
+                )
+
     def stop_all(self, accounts: dict | None = None) -> None:
         """Stop all typing indicators and delete temp messages.
 
@@ -804,9 +834,14 @@ class FeishuManager:
             # Always clean up typing indicator, even if send_text or
             # downstream logic throws. For chat_id-type receives we
             # already know the key; for open_id we get it from the result
-            # (or fall back to receive_id if send failed).
+            # (or fall back to a receive_id-based lookup if send failed
+            # before the API returned the real chat_id).
             if chat_id:
                 _typing_manager.stop_typing(acct, chat_id)
+            else:
+                _typing_manager.stop_typing_by_receive(
+                    acct, receive_id, receive_id_type,
+                )
 
     def _check(self, args: dict) -> dict:
         account = self._resolve_account(args)
