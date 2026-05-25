@@ -38,7 +38,7 @@ VOICE_EXTS = {
 def _iter_files(root: Path):
     if not root.exists() or not root.is_dir():
         return
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
         for fname in filenames:
             yield Path(dirpath) / fname
 
@@ -56,11 +56,11 @@ def audit(agent_dir: Path, max_paths: int) -> dict:
     inbox_msgs = 0
     sent_msgs = 0
     attachment_files: list[tuple[Path, int]] = []
-    voice_files: list[Path] = []
+    voice_count = 0
 
     if root.exists() and root.is_dir():
         for entry in sorted(root.iterdir()):
-            if not entry.is_dir():
+            if not entry.is_dir() or entry.name.startswith("."):
                 continue
             accounts.append(entry.name)
 
@@ -71,13 +71,15 @@ def audit(agent_dir: Path, max_paths: int) -> dict:
                         continue
                     if (msg_dir / "message.json").is_file():
                         inbox_msgs += 1
+                    # Runtime stores downloaded inbound media under inbox/*/attachments/.
+                    # Sent records do not create an attachments directory today.
                     att_dir = msg_dir / "attachments"
                     if att_dir.is_dir():
                         for f in _iter_files(att_dir):
                             size = _safe_size(f)
                             attachment_files.append((f, size))
                             if f.suffix.lower() in VOICE_EXTS:
-                                voice_files.append(f)
+                                voice_count += 1
 
             sent_dir = entry / "sent"
             if sent_dir.is_dir():
@@ -105,7 +107,7 @@ def audit(agent_dir: Path, max_paths: int) -> dict:
         "inbox_messages": inbox_msgs,
         "sent_messages": sent_msgs,
         "attachment_files": len(attachment_files),
-        "voice_candidates": len(voice_files),
+        "voice_candidates": voice_count,
         "attachment_bytes": total_bytes,
         "candidates": candidates,
         "top_attachments": top_paths,
