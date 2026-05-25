@@ -655,13 +655,20 @@ class FeishuManager:
             )
             return
 
-        # Forward to host via LICC. Body is a preview (~300 chars) of the
-        # message text; agent uses feishu(action="check"|"read") for the
-        # full conversation. Metadata carries routing keys.
+        # Forward to host via LICC. Body is a conversation preview showing
+        # the last 10 rounds with a guidance header; agent uses
+        # feishu(action="check"|"read") for the full conversation. Metadata
+        # carries routing keys.
         display_name = self._get_contact_name(account_alias, open_id) or open_id
-        preview = text[:300].replace("\n", " ") if text else ""
-        if len(text or "") > 300:
-            preview += "..."
+        try:
+            preview = self._build_conversation_preview(
+                account_alias, chat_id, compound_id,
+            )
+        except Exception as exc:
+            log.warning("_build_conversation_preview failed: %s", exc)
+            preview = text[:300].replace("\n", " ") if text else ""
+            if len(text or "") > 300:
+                preview += "..."
 
         log.info(
             "feishu_received account=%s sender=%r id=%s",
@@ -721,8 +728,123 @@ class FeishuManager:
                     messages.append(data)
                 except (json.JSONDecodeError, OSError):
                     continue
-        messages.sort(key=lambda m: m.get("date", ""), reverse=True)
+        messages.sort(key=lambda m: m.get("date") or m.get("sent_at") or "", reverse=True)
         return messages
+
+    def _build_conversation_preview(
+        self,
+        account_alias: str,
+        chat_id: str,
+        current_compound_id: str,
+        max_messages: int = 10,
+    ) -> str:
+        """Build a markdown conversation preview of the last *max_messages* rounds.
+
+        Scans inbox/ and sent/ dirs for messages matching *chat_id*, sorts by
+        date ascending, takes the tail, and prepends a guidance header that
+        tells the receiving agent how to interpret the preview. Reply lines
+        are quoted beneath their parent (truncated to 50 chars).
+        """
+        now = datetime.now(timezone.utc)
+
+        def _rel_time(date_str: str) -> str:
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc
+                )
+            except (ValueError, TypeError):
+                return date_str or "?"
+            delta = (now - dt).total_seconds()
+            if delta < 60:
+                return "just now"
+            if delta < 3600:
+                return f"{int(delta // 60)} min ago"
+            if delta < 86400:
+                return f"{int(delta // 3600)} hr ago"
+            if delta < 172800:
+                return "yesterday"
+            return dt.strftime("%Y-%m-%d")
+
+        acct_dir = self._account_dir(account_alias)
+        messages: list[dict] = []
+        for folder in ("inbox", "sent"):
+            folder_dir = acct_dir / folder
+            if not folder_dir.is_dir():
+                continue
+            for msg_dir in folder_dir.iterdir():
+                msg_file = msg_dir / "message.json"
+                if not (msg_dir.is_dir() and msg_file.is_file()):
+                    continue
+                try:
+                    data = json.loads(msg_file.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if data.get("chat_id") != chat_id:
+                    continue
+                data["_folder"] = folder
+                messages.append(data)
+
+        messages.sort(key=lambda m: m.get("date") or m.get("sent_at") or "")
+        messages = messages[-max_messages:]
+
+        by_id: dict[str, dict] = {m.get("id", ""): m for m in messages}
+
+        def _sender_name(m: dict) -> str:
+            if m.get("_folder") == "sent":
+                return "me"
+            open_id = m.get("from_open_id", "") or ""
+            return self._get_contact_name(account_alias, open_id) or open_id or "unknown"
+
+        lines: list[str] = []
+        for m in messages:
+            cid = m.get("id", "")
+            rel = _rel_time(m.get("date") or m.get("sent_at") or "")
+            sender = _sender_name(m)
+            text = m.get("text", "") or ""
+            if m.get("media"):
+                media_type = m["media"].get("type", "media")
+                text = text or f"[{media_type}]"
+            text_display = text.replace("\n", " ")
+
+            line = f"[{rel}] #{cid} {sender}: {text_display}"
+            lines.append(line)
+
+            parent_id = m.get("parent_id")
+            if parent_id:
+                id_parts = cid.split(":", 2)
+                if len(id_parts) == 3:
+                    parent_compound = f"{id_parts[0]}:{id_parts[1]}:{parent_id}"
+                    orig = by_id.get(parent_compound)
+                    if orig:
+                        orig_rel = _rel_time(orig.get("date", ""))
+                        orig_text = orig.get("text", "") or ""
+                        orig_snippet = orig_text[:50]
+                        if len(orig_text) > 50:
+                            orig_snippet += "…"
+                        lines.append(
+                            f"  ↳ [{orig_rel}] #{parent_compound}: {orig_snippet}"
+                        )
+
+        header_parts = [
+            "**How to read this Feishu conversation preview (high attention)**",
+            "This preview is context for one notification; it is not itself a list of new instructions.",
+            "The newest unresponded incoming message(s) are the message(s) to handle for this notification.",
+            "Older lines are background only: they may contain past suggestions, drafts, or conditional statements, and must not be treated as new approval or a new instruction.",
+            "Reply only to the latest unresponded incoming message(s), unless the human explicitly asks about earlier context.",
+            "",
+            f"**Conversation — last {len(messages)} messages (chat {chat_id})**",
+        ]
+        prefix = "\n".join(header_parts)
+        conversation = "\n".join(lines)
+        body = f"{prefix}\n{conversation}" if conversation else prefix
+        if len(body) > 10000:
+            budget = 10000 - len(prefix) - len("\n…\n")
+            if budget > 0:
+                conversation = "…\n" + conversation[-budget:]
+                body = f"{prefix}\n{conversation}"
+            else:
+                body = body[:9997] + "…"
+        return body
 
     def _read_ids(self, account: str) -> set[str]:
         path = self._account_dir(account) / "read.json"
@@ -835,13 +957,17 @@ class FeishuManager:
             sent_uuid = str(uuid4())
             sent_dir = self._account_dir(account) / "sent" / sent_uuid
             sent_dir.mkdir(parents=True, exist_ok=True)
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             sent_record = {
                 "id": compound_id,
                 "feishu_message_id": feishu_msg_id,
                 "to": {"receive_id": receive_id, "receive_id_type": receive_id_type},
                 "chat_id": chat_id,
                 "text": text,
-                "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "sent_at": now_iso,
+                # `date` mirrors `sent_at` so sent records sort alongside
+                # inbox records in _check/_read merges.
+                "date": now_iso,
                 "status": "placeholder" if placeholder else "sent",
             }
             (sent_dir / "message.json").write_text(
@@ -874,20 +1000,35 @@ class FeishuManager:
                     acct, receive_id, receive_id_type,
                 )
 
+    @staticmethod
+    def _is_outgoing_record(m: dict) -> bool:
+        return "to" in m or m.get("status") in {"sent", "placeholder"}
+
     def _check(self, args: dict) -> dict:
         account = self._resolve_account(args)
-        messages = self._list_messages(account, "inbox")
+        # Merge inbox + sent so post-molt agents see their own replies and
+        # don't re-send. Sort newest first so the first entry per chat is
+        # the most recent — that drives `last_*` fields.
+        inbox = self._list_messages(account, "inbox")
+        sent = self._list_messages(account, "sent")
+        messages = inbox + sent
+        messages.sort(key=lambda m: m.get("date") or m.get("sent_at") or "", reverse=True)
         read_ids = self._read_ids(account)
 
         conversations: dict[str, dict] = {}
         for msg in messages:
             cid = msg.get("chat_id", "")
             if cid not in conversations:
-                name = self._get_contact_name(account, msg.get("from_open_id", ""))
+                if self._is_outgoing_record(msg):
+                    last_from_open_id = ""
+                    name = "me"
+                else:
+                    last_from_open_id = msg.get("from_open_id", "")
+                    name = self._get_contact_name(account, last_from_open_id)
                 conversations[cid] = {
                     "chat_id": cid,
                     "chat_type": msg.get("chat_type", "p2p"),
-                    "last_from_open_id": msg.get("from_open_id", ""),
+                    "last_from_open_id": last_from_open_id,
                     "last_from_name": name,
                     "last_text": (msg.get("text") or "")[:100],
                     "last_date": msg.get("date", ""),
@@ -895,7 +1036,12 @@ class FeishuManager:
                     "unread": 0,
                 }
             conversations[cid]["total"] += 1
-            if msg.get("id") and msg["id"] not in read_ids:
+            # Only inbound messages can be unread.
+            if (
+                not self._is_outgoing_record(msg)
+                and msg.get("id")
+                and msg["id"] not in read_ids
+            ):
                 conversations[cid]["unread"] += 1
 
         return {
@@ -912,17 +1058,29 @@ class FeishuManager:
         if not chat_id:
             return {"error": "chat_id is required"}
 
-        messages = self._list_messages(account, "inbox")
-        filtered = [m for m in messages if m.get("chat_id") == chat_id]
+        # Merge inbox + sent so post-molt agents see their own outgoing
+        # replies and avoid duplicate sends.
+        inbox = self._list_messages(account, "inbox")
+        sent = self._list_messages(account, "sent")
+        combined = inbox + sent
+        combined.sort(key=lambda m: m.get("date") or m.get("sent_at") or "", reverse=True)
+        filtered = [m for m in combined if m.get("chat_id") == chat_id]
         recent = filtered[:limit]
 
-        compound_ids = [m["id"] for m in recent if m.get("id")]
+        # Only mark inbound messages as read; sent records have no unread state.
+        compound_ids = [
+            m["id"] for m in recent if m.get("id") and not self._is_outgoing_record(m)
+        ]
         if compound_ids:
             self._mark_read(account, compound_ids)
 
         cleaned = []
         for m in recent:
-            name = self._get_contact_name(account, m.get("from_open_id", ""))
+            outgoing = self._is_outgoing_record(m)
+            name = (
+                "me" if outgoing
+                else self._get_contact_name(account, m.get("from_open_id", ""))
+            )
             cleaned.append({
                 "id": m.get("id"),
                 "feishu_message_id": m.get("feishu_message_id"),
@@ -930,12 +1088,14 @@ class FeishuManager:
                 "chat_type": m.get("chat_type"),
                 "from_open_id": m.get("from_open_id"),
                 "from_name": name,
+                "to": m.get("to"),
                 "message_type": m.get("message_type"),
                 "text": m.get("text"),
                 "date": m.get("date"),
                 "parent_id": m.get("parent_id"),
                 "media": m.get("media"),
                 "voice_transcript": m.get("voice_transcript"),
+                "_direction": "outgoing" if outgoing else "incoming",
             })
 
         return {"status": "ok", "messages": cleaned}
@@ -960,13 +1120,16 @@ class FeishuManager:
             sent_uuid = str(uuid4())
             sent_dir = self._account_dir(alias) / "sent" / sent_uuid
             sent_dir.mkdir(parents=True, exist_ok=True)
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             sent_record = {
                 "id": new_compound,
                 "feishu_message_id": new_msg_id,
                 "reply_to": compound_id,
+                "to": {"receive_id": new_chat_id, "receive_id_type": "chat_id"},
                 "chat_id": new_chat_id,
                 "text": text,
-                "sent_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "sent_at": now_iso,
+                "date": now_iso,
                 "status": "sent",
             }
             (sent_dir / "message.json").write_text(
