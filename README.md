@@ -96,6 +96,53 @@ The server reads its app config from a JSON file pointed at by `LINGTAI_FEISHU_C
 
 Then run `system(action="refresh")` from the agent. The MCP subprocess starts, the per-account Feishu WebSocket clients connect, and the omnibus `feishu` tool becomes available.
 
+## Cleanup / Footprint
+
+This addon persists state under the agent's working directory. It does **not** delete its own data automatically. Cleanup is an explicit, human-approved operation.
+
+### What this addon leaves behind
+
+Everything lives under `<agent_dir>/feishu/`:
+
+- `feishu/{account}/inbox/{uuid}/message.json` — every inbound LICC message.
+- `feishu/{account}/inbox/{uuid}/attachments/` — downloaded audio/voice/other resources (can grow large).
+- `feishu/{account}/sent/{uuid}/message.json` — every outbound reply / send, including placeholders.
+- `feishu/{account}/contacts.json` — saved open_id → display-name map.
+- `feishu/{account}/read.json` — list of compound message IDs already marked read.
+- `feishu/{account}/state.json` — per-account runtime state (cursors, etc.).
+
+### What must never be deleted blindly
+
+- `contacts.json`, `read.json`, `state.json` — losing these breaks read-tracking, contact aliases, and resume behavior. Treat as durable.
+- `sent/` — these are records of what the agent itself sent. Deleting them loses outbound history.
+- Any `message.json` referenced by an unresolved thread the agent is still working on.
+
+Attachments under `inbox/*/attachments/` are the usual growth driver and the safest cleanup target — but still only after a dry-run report and explicit user consent.
+
+### Read-only footprint check
+
+Run the audit script. It is pure stdlib, never deletes anything, and appends one JSONL record to `<agent_dir>/logs/cleanup.jsonl` per run:
+
+```bash
+python3 scripts/footprint_audit.py <agent_dir>
+python3 scripts/footprint_audit.py <agent_dir> --json
+python3 scripts/footprint_audit.py <agent_dir> --max-paths 50
+```
+
+The report counts accounts, inbox/sent `message.json` files, attachment files, voice/audio candidates (`.ogg .opus .mp3 .wav .m4a .oga .webm .aac .flac`), total attachment bytes, and lists the largest attachment paths.
+
+### Cleanup protocol
+
+1. Run `footprint_audit.py` to produce a dry-run report.
+2. Show the report to the user.
+3. Get **explicit** consent before any destructive deletion. Default to keeping data.
+4. After deletion (done by a separate, human-driven tool — not this addon), append a follow-up record to `<agent_dir>/logs/cleanup.jsonl` with `human_approved: true` and what was actually removed.
+
+### Audit cadence
+
+- Run the audit when an agent has been running for a long time, when the working directory feels large, when troubleshooting disk usage, or roughly once a week for active agents.
+- Agents reading this README for setup, troubleshooting, or long-running operation should consider running the footprint audit themselves and **ask the user before any cleanup** if the footprint is large, stale, or contains privacy-sensitive content (voice/audio under `attachments/`, contact lists).
+
 ## Troubleshooting
 
 - **`LINGTAI_FEISHU_CONFIG env var not set`** — your `init.json` `mcp.feishu.env` entry is missing the `LINGTAI_FEISHU_CONFIG` key.
