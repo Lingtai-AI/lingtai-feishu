@@ -22,7 +22,7 @@ Voice transcription requires the `voice` extra:
 pip install lingtai-feishu[voice]
 ```
 
-The transcript replaces the empty text in the payload, and metadata includes `is_voice_transcript: true`, `voice_duration`, and `voice_transcript` (with language, segments, etc.).
+The transcript replaces the empty text in the payload, and metadata includes `is_voice_transcript: true`, `voice_duration`, and `voice_transcript` (with language, segments, etc.). After a successful transcription, the downloaded raw audio file is deleted immediately; LingTai keeps the JSON payload and transcript metadata only. If transcription fails, the audio file is retained with the message record so the failure can be inspected or retried manually.
 
 ### Rich Feedback
 

@@ -624,6 +624,17 @@ class FeishuManager:
                                 "duration": transcript.get("duration"),
                                 "segments": transcript.get("segments"),
                             }
+                            try:
+                                filepath.unlink(missing_ok=True)
+                                media_info["path"] = None
+                                media_info["retained"] = False
+                            except OSError as exc:
+                                media_info["retained"] = True
+                                media_info["retention_error"] = str(exc)
+                                log.warning(
+                                    "Failed to delete transcribed audio %s: %s",
+                                    filepath, exc,
+                                )
                             log.info("Voice transcription successful: %s chars",
                                      len(text))
                         else:
