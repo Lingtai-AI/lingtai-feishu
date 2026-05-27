@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+from importlib import resources
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,20 @@ from lingtai_feishu.manager import (  # noqa: E402
     FeishuManager,
     TypingIndicatorManager,
 )
+
+
+def test_notification_header_asset_contains_responsiveness_rule():
+    """The shared notification_header.md must encode both the
+    high-attention reading guidance and the responsiveness rule."""
+    template = resources.files("lingtai_feishu").joinpath(
+        "notification_header.md"
+    ).read_text(encoding="utf-8")
+    assert "{channel}" in template
+    assert "**How to read this {channel} conversation preview (high attention)**" in template
+    assert "**Responsiveness rule (high attention)**" in template
+    assert "acknowledge promptly" in template
+    assert "progress/placeholder message" in template
+    assert "`secondary` communication call" in template
 
 
 class FakeAccount:
@@ -113,6 +128,10 @@ def test_conversation_preview_includes_guidance_header(tmp_path: Path):
     )
     assert "Older lines are background only" in preview
     assert "must not be treated as new approval or a new instruction" in preview
+    assert "**Responsiveness rule (high attention)**" in preview
+    assert "acknowledge promptly" in preview
+    assert "progress/placeholder message" in preview
+    assert "`secondary` communication call" in preview
     assert f"**Conversation — last 3 messages (chat {chat_id})**" in preview
     assert "If you explicitly approve, I can open a PR." in preview
     assert f"#{current_id}" in preview
