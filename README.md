@@ -18,6 +18,15 @@ the `feishu` tool, the MCP server publishes ordinary MCP resources:
 | `lingtai://docs/configuration` | Authoritative config schema, environment variables, security notes, and tool entrypoint summary. |
 | `lingtai://docs/troubleshooting` | Common Feishu setup/runtime failures and diagnostic steps. |
 | `lingtai://status` | Redacted runtime status derived from config and manager state. App secrets are never returned. |
+| `lingtai://onboarding/feishu` | Agent-facing browser/HTML onboarding recipe: how to obtain/enter Feishu `app_id`/`app_secret` from the Developer Console, generate and open a local setup-checklist page, verify via `lingtai://status`, and redact secrets. Feishu has no QR/scan login. |
+| `lingtai://onboarding/html-template` | Self-contained, secret-free static HTML setup-checklist page with a `{{SETUP}}` placeholder. An agent fills in non-secret setup context, writes it to a local file, and opens it in a browser. No scripts, no external assets, no credentials. |
+
+Onboarding is MCP-owned: an agent reads `lingtai://onboarding/feishu`, and (if a
+human wants a browser checklist to follow) reads
+`lingtai://onboarding/html-template`, fills the `{{SETUP}}` placeholder with
+non-secret setup context, writes the page to disk, and opens it. The page is a
+*checklist* — credentials are still entered into the config JSON, never into the
+generated HTML.
 
 Boundary: `/mcp` is LingTai's human-facing TUI control panel and should render
 these resources generically. Agents should use MCP tools/resources/prompts
