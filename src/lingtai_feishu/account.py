@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 # the optional dependency installed.
 lark: Any = None
 
+# The lark_oapi.ws.client module, captured lazily. Stored as a module global so
+# tests can inject a fake SDK module (see tests/test_ws_event_loop.py). The real
+# SDK keeps its own module-level ``loop`` attribute that ``Client.start()`` uses
+# directly — see ``_ThreadLocalLoop`` and ``_ws_loop`` for why that matters.
+_sdk_ws_client_module: Any = None
+
 
 def _import_lark() -> Any:
     global lark
@@ -27,6 +33,80 @@ def _import_lark() -> Any:
         import lark_oapi as _lark
         lark = _lark
     return lark
+
+
+def _get_sdk_ws_client_module() -> Any:
+    """Return the ``lark_oapi.ws.client`` module (or an injected fake).
+
+    Tests set ``_sdk_ws_client_module`` directly to a stand-in that exposes the
+    same ``loop`` attribute contract as the real SDK module.
+    """
+    global _sdk_ws_client_module
+    if _sdk_ws_client_module is None:
+        import lark_oapi.ws.client as _ws_client
+        _sdk_ws_client_module = _ws_client
+    return _sdk_ws_client_module
+
+
+class _ThreadLocalLoop:
+    """Per-thread proxy that stands in for ``lark_oapi.ws.client.loop``.
+
+    The SDK captures ``loop = asyncio.get_event_loop()`` at *import time* into a
+    module global, and ``Client.start()`` calls ``loop.run_until_complete(...)``
+    on that global. When the SDK is imported on the main MCP thread (while
+    ``asyncio.run(serve())`` is active), the global captures the already-running
+    main loop, so ``run_until_complete`` raises
+    ``RuntimeError: This event loop is already running`` and inbound messages
+    never arrive (issue #113).
+
+    Setting a thread-current loop does not help: ``start()`` ignores it and uses
+    the module global. So we replace the module global with this proxy, which
+    forwards every attribute access to the *calling thread's* bound loop. Each WS
+    thread binds its own fresh loop, so concurrent accounts never share or
+    clobber a loop, even though the SDK exposes a single module-global name.
+
+    The original loop is preserved as a fallback so any code path that touches
+    the global from an unbound thread keeps working unchanged.
+    """
+
+    def __init__(self, fallback: Any) -> None:
+        self._local = threading.local()
+        self._fallback = fallback
+
+    def bind(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._local.loop = loop
+
+    def unbind(self) -> None:
+        self._local.loop = None
+
+    def _resolve(self) -> Any:
+        loop = getattr(self._local, "loop", None)
+        return loop if loop is not None else self._fallback
+
+    def __getattr__(self, name: str) -> Any:
+        # __getattr__ only fires for names not found normally, so our own
+        # attributes (_local, _fallback, bind, ...) are unaffected.
+        return getattr(self._resolve(), name)
+
+
+_install_lock = threading.Lock()
+
+
+def _install_thread_local_sdk_loop(sdk: Any) -> _ThreadLocalLoop:
+    """Ensure ``sdk.loop`` is a ``_ThreadLocalLoop`` and return it.
+
+    Idempotent and thread-safe: the first caller swaps the module-global loop
+    for a proxy (preserving the original as the fallback); subsequent callers
+    reuse the same proxy. Returns the proxy so the caller can ``bind``/``unbind``
+    its own thread loop.
+    """
+    with _install_lock:
+        current = getattr(sdk, "loop", None)
+        if isinstance(current, _ThreadLocalLoop):
+            return current
+        proxy = _ThreadLocalLoop(fallback=current)
+        sdk.loop = proxy
+        return proxy
 
 
 class FeishuAccount:
@@ -120,16 +200,28 @@ class FeishuAccount:
     def _ws_loop(self) -> None:
         """Run the blocking WebSocket client in a background thread.
 
-        lark-oapi's ``ws.Client.start()`` calls ``asyncio.get_event_loop()`` and
-        then ``loop.run_until_complete(...)``. In a daemon thread that has no
-        loop of its own, that lookup either raises or returns a loop tied to the
-        main thread that is already running, surfacing as
-        ``RuntimeError: This event loop is already running`` and breaking inbound
-        messages (issue #113). Create a fresh loop, make it the current thread's
-        loop before ``start()``, and tear it down afterwards.
+        lark-oapi captures ``loop = asyncio.get_event_loop()`` into a *module
+        global* (``lark_oapi.ws.client.loop``) at import time, and
+        ``Client.start()`` calls ``loop.run_until_complete(...)`` on that global
+        — it never re-reads the thread-current loop. Imported on the main MCP
+        thread under ``asyncio.run(serve())``, that global is the already-running
+        main loop, so ``run_until_complete`` raises
+        ``RuntimeError: This event loop is already running`` and inbound messages
+        are never delivered (issue #113).
+
+        Fix: give this thread a fresh loop and make the SDK's module-global
+        ``loop`` resolve to it for the duration of ``start()`` via a per-thread
+        proxy (``_ThreadLocalLoop``). The proxy is installed once and shared, so
+        multiple accounts each running their own WS thread get an independent
+        loop without clobbering a single global. The thread binding is removed in
+        ``finally`` and the fresh loop is closed.
         """
+        sdk = _get_sdk_ws_client_module()
+        proxy = _install_thread_local_sdk_loop(sdk)
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        proxy.bind(loop)
         try:
             self._ws_client.start()
         except Exception as e:
@@ -139,6 +231,7 @@ class FeishuAccount:
                     self.alias, e,
                 )
         finally:
+            proxy.unbind()
             try:
                 loop.close()
             finally:
