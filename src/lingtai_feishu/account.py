@@ -7,6 +7,7 @@ stop() signals the thread to stop and joins it.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -117,7 +118,18 @@ class FeishuAccount:
         )
 
     def _ws_loop(self) -> None:
-        """Run the blocking WebSocket client in a background thread."""
+        """Run the blocking WebSocket client in a background thread.
+
+        lark-oapi's ``ws.Client.start()`` calls ``asyncio.get_event_loop()`` and
+        then ``loop.run_until_complete(...)``. In a daemon thread that has no
+        loop of its own, that lookup either raises or returns a loop tied to the
+        main thread that is already running, surfacing as
+        ``RuntimeError: This event loop is already running`` and breaking inbound
+        messages (issue #113). Create a fresh loop, make it the current thread's
+        loop before ``start()``, and tear it down afterwards.
+        """
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
             self._ws_client.start()
         except Exception as e:
@@ -126,6 +138,11 @@ class FeishuAccount:
                     "Feishu WS client exited unexpectedly (%s): %s",
                     self.alias, e,
                 )
+        finally:
+            try:
+                loop.close()
+            finally:
+                asyncio.set_event_loop(None)
 
     def stop(self) -> None:
         """Signal the WebSocket thread to stop."""
