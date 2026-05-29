@@ -63,12 +63,15 @@ _PROFILE_MIME = "application/vnd.lingtai.mcp-profile+json"
 _MARKDOWN_SKILL_MIME = "text/markdown; profile=lingtai-skill"
 _MARKDOWN_MIME = "text/markdown"
 _JSON_MIME = "application/json"
+_HTML_MIME = "text/html"
 
 _MANIFEST_URI = "lingtai://manifest"
 _SKILL_URI = "lingtai://skills/feishu"
 _CONFIG_DOC_URI = "lingtai://docs/configuration"
 _TROUBLESHOOTING_DOC_URI = "lingtai://docs/troubleshooting"
 _STATUS_URI = "lingtai://status"
+_ONBOARDING_DOC_URI = "lingtai://onboarding/feishu"
+_ONBOARDING_TEMPLATE_URI = "lingtai://onboarding/html-template"
 
 _RESOURCE_INDEX = [
     {
@@ -100,6 +103,18 @@ _RESOURCE_INDEX = [
         "name": "Feishu safe status",
         "mimeType": _JSON_MIME,
         "description": "Redacted runtime status derived from config and manager state.",
+    },
+    {
+        "uri": _ONBOARDING_DOC_URI,
+        "name": "Feishu browser/HTML onboarding guide",
+        "mimeType": _MARKDOWN_MIME,
+        "description": "Agent-facing recipe for obtaining/entering Feishu app credentials and generating a local HTML setup-checklist page; covers verification via lingtai://status and secret redaction.",
+    },
+    {
+        "uri": _ONBOARDING_TEMPLATE_URI,
+        "name": "Feishu onboarding HTML template",
+        "mimeType": _HTML_MIME,
+        "description": "Self-contained, secret-free static HTML setup-checklist page with a {{SETUP}} placeholder, ready to write to disk and open in a browser.",
     },
 ]
 
@@ -215,6 +230,8 @@ def _profile_manifest(manager: FeishuManager | None) -> dict[str, Any]:
             "configuration": _CONFIG_DOC_URI,
             "troubleshooting": _TROUBLESHOOTING_DOC_URI,
             "status": _STATUS_URI,
+            "onboarding": _ONBOARDING_DOC_URI,
+            "onboarding_html_template": _ONBOARDING_TEMPLATE_URI,
         },
         "status": _safe_status_payload(manager),
     }
@@ -346,6 +363,97 @@ resources and `feishu` tool directly.
 """
 
 
+def _onboarding_markdown() -> str:
+    return """# lingtai-feishu browser/HTML onboarding
+
+This resource is the agent-facing recipe for walking a human through a *local*
+HTML + browser onboarding page for the `lingtai-feishu` MCP. It complements
+`lingtai://docs/configuration` and `lingtai://docs/troubleshooting`, which
+remain authoritative for config fields and failure modes.
+
+This MCP owns onboarding; the LingTai `/mcp` TUI is the human control panel and
+renders these resources generically. Agents drive onboarding through the
+resources below — do not embed Feishu/Lark platform details in a LingTai skill.
+
+## What "onboarding" means for Feishu (no QR/scan login)
+
+Feishu/Lark authenticates with **app credentials** — an `app_id` (`cli_...`)
+and an `app_secret` — issued by the Feishu/Lark **Developer Console**. There is
+**no QR/scan login flow** for this MCP. Onboarding is therefore about helping a
+human:
+
+1. Create (or open) a custom app in the Developer Console.
+2. Copy its `app_id` and `app_secret`.
+3. Grant the messaging scopes and enable the event subscription the bot needs.
+4. Put the credentials into the `lingtai-feishu` config JSON (never into the
+   onboarding page).
+5. Verify the result with `lingtai://status`.
+
+## When to use this
+
+A human needs to connect a Feishu/Lark app as the bot backend for the first
+time, or after rotating the `app_secret`.
+
+## Setup paths (pick one)
+
+1. **Direct config edit (recommended).** Read `lingtai://docs/configuration`
+   for the exact schema, then write the `app_id`/`app_secret` into the config
+   JSON pointed at by `LINGTAI_FEISHU_CONFIG`. Refresh the MCP afterward.
+
+2. **Agent-generated local HTML checklist page.** When a human wants a clean,
+   readable, at-a-glance setup checklist in the browser (e.g. to follow along
+   while clicking through the Developer Console), read
+   `lingtai://onboarding/html-template`, substitute the `{{SETUP}}` placeholder
+   with **non-secret** setup context (config file path, account alias,
+   required scopes, a link-free step list), write it to a local file, and open
+   it. The template is self-contained — no scripts, no external assets, no
+   secrets — so it is safe to drop on disk.
+
+## Generating the local HTML page (path 2)
+
+1. Read the `lingtai://onboarding/html-template` resource.
+2. Replace the `{{SETUP}}` placeholder with **non-secret** setup context only:
+   the config file path, the account `alias`, the required messaging scopes and
+   event-subscription steps, and a short ordered checklist. HTML-escape any
+   dynamic text you insert so nothing can inject markup into the local
+   `file://` page.
+3. **Never** put the `app_secret` (or any credential value) into the page. The
+   page is a *checklist*, not a credential store. Redact: the only safe thing
+   to show is the *field name* `app_secret`, never its value.
+4. Write the result to a local file (e.g. `./feishu-onboarding.html`).
+5. Open it in the default browser (`open` / `xdg-open` / `cmd.exe /c start`).
+6. Walk the human through entering the credentials into the **config JSON**
+   (not the page), then refresh the MCP.
+
+## Verifying setup
+
+Use `lingtai://status` to confirm the result. It reports, per account,
+`has_app_id` and `has_app_secret` (booleans) and a non-secret `app_id`, and
+**never** returns the `app_secret` itself. A healthy setup shows
+`config_readable: true` and the expected `accounts_count`.
+
+## Secret handling
+
+- The `app_secret` is the only secret credential. **Never** paste, echo, log,
+  commit, or render `app_secret` into chat, issues, PRs, or the generated HTML
+  page. Always **redact** it. The onboarding template is intentionally
+  secret-free and must stay that way.
+- The `app_id` (`cli_...`) is a non-secret identifier and may appear in status
+  and docs.
+- If an `app_secret` is ever exposed, rotate it in the Developer Console.
+
+## After setup
+
+Refresh the `lingtai-feishu` MCP so it picks up the new credentials. See
+`lingtai://docs/troubleshooting` if scope/event-subscription/WebSocket errors
+appear.
+"""
+
+
+def _onboarding_html_template() -> str:
+    return _ONBOARDING_HTML
+
+
 def _resource_payloads(manager: FeishuManager | None) -> dict[str, tuple[str, str]]:
     return {
         _MANIFEST_URI: (_PROFILE_MIME, _json_dumps(_profile_manifest(manager))),
@@ -353,7 +461,105 @@ def _resource_payloads(manager: FeishuManager | None) -> dict[str, tuple[str, st
         _CONFIG_DOC_URI: (_MARKDOWN_MIME, _configuration_markdown()),
         _TROUBLESHOOTING_DOC_URI: (_MARKDOWN_MIME, _troubleshooting_markdown()),
         _STATUS_URI: (_JSON_MIME, _json_dumps(_safe_status_payload(manager))),
+        _ONBOARDING_DOC_URI: (_MARKDOWN_MIME, _onboarding_markdown()),
+        _ONBOARDING_TEMPLATE_URI: (_HTML_MIME, _onboarding_html_template()),
     }
+
+
+# Static, self-contained onboarding HTML template. No JavaScript, no external
+# assets, and no secrets — an agent reads this, substitutes a non-secret setup
+# checklist into the ``{{SETUP}}`` placeholder, writes it to a local file, and
+# opens it in a browser. Feishu has no QR/scan login, so this is a setup
+# *checklist* page, not a login page. The bold banner reminds the human that
+# the ``app_secret`` belongs in the config JSON, never in this page.
+_ONBOARDING_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LingTai - Feishu/Lark app setup checklist</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1a1a1a;
+    --bg: #fafafa;
+    --accent: #2d6cdf;
+    --warn-fg: #8a1a1a;
+    --warn-bg: #fce8e6;
+    --warn-border: #d04040;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #eee; --bg: #181818;
+      --warn-fg: #ffb3a8;
+      --warn-bg: #3a1a1a;
+      --warn-border: #c45050;
+    }
+  }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card { max-width: 640px; padding: 2.2em 2em; }
+  h1 { font-size: 1.4em; margin: 0 0 .3em; }
+  p { line-height: 1.5; margin: .5em 0; }
+  code { background: rgba(127,127,127,.18); padding: .1em .35em; border-radius: 4px; }
+  .setup { margin: 1.2em 0; }
+  .hint { opacity: .75; font-size: .9em; }
+  .warn {
+    background: var(--warn-bg);
+    color: var(--warn-fg);
+    border: 1px solid var(--warn-border);
+    border-radius: 8px;
+    padding: .9em 1em;
+    margin: 0 0 1.2em;
+    font-size: .95em;
+  }
+  .warn strong { display: block; margin-bottom: .25em; font-size: 1em; }
+  .footnote {
+    border-top: 1px solid var(--warn-border);
+    margin-top: 1.4em;
+    padding-top: .9em;
+    font-size: .82em;
+    opacity: .85;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="warn" role="alert">
+      <strong>&#9888; Do not paste your app_secret into this page</strong>
+      This is a read-only setup checklist. Your Feishu <code>app_secret</code>
+      is a credential — it belongs only in the <code>lingtai-feishu</code>
+      config JSON, never in this HTML page, chat, issues, or PRs. Never share
+      it; rotate it in the Developer Console if it leaks.
+    </div>
+    <h1>LingTai - Feishu/Lark app setup</h1>
+    <p>Connect a Feishu/Lark custom app as this bot's backend. Feishu uses
+       <em>app credentials</em> (an <code>app_id</code> and an
+       <code>app_secret</code>) from the Developer Console — there is no QR
+       login. Follow the checklist below.</p>
+    <div class="setup">{{SETUP}}</div>
+    <p class="hint">
+      After entering the <code>app_id</code> and <code>app_secret</code> into
+      the config JSON, refresh the MCP and verify with the
+      <code>lingtai://status</code> resource. You can close this tab once
+      <code>has_app_id</code> and <code>has_app_secret</code> are both true.
+    </p>
+    <div class="footnote">
+      <strong>Where do the credentials go?</strong>
+      Into the config file referenced by <code>LINGTAI_FEISHU_CONFIG</code> —
+      not into this page. This page only lists the steps; it never stores or
+      transmits credentials.
+    </div>
+  </div>
+</body>
+</html>
+"""
 
 
 # ---------------------------------------------------------------------------
