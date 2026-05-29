@@ -6,6 +6,23 @@ This is the canonical setup, configuration, and troubleshooting doc for the `lin
 
 > **MCP / LICC contract spec:** see the `lingtai-anatomy` skill, `reference/mcp-protocol.md`, for the canonical specification of the catalog → registry → activation chain, environment-variable injection, and the LICC v1 inbox callback protocol. The reference client implementation is `src/lingtai_feishu/licc.py` in this repo (vendored verbatim into all first-party LingTai MCP repos — copy it if you're writing your own).
 
+## LingTai profile resources
+
+`lingtai-feishu` is self-describing for LingTai-aware clients. In addition to
+the `feishu` tool, the MCP server publishes ordinary MCP resources:
+
+| Resource URI | Purpose |
+|---|---|
+| `lingtai://manifest` | Machine-readable LingTai MCP profile: server metadata, ownership boundaries, resource index, agent entrypoints, and safe status. |
+| `lingtai://skills/feishu` | Thin agent-facing pointer skill. It routes agents to this MCP's own resources instead of copying Feishu details into LingTai skills. |
+| `lingtai://docs/configuration` | Authoritative config schema, environment variables, security notes, and tool entrypoint summary. |
+| `lingtai://docs/troubleshooting` | Common Feishu setup/runtime failures and diagnostic steps. |
+| `lingtai://status` | Redacted runtime status derived from config and manager state. App secrets are never returned. |
+
+Boundary: `/mcp` is LingTai's human-facing TUI control panel and should render
+these resources generically. Agents should use MCP tools/resources/prompts
+directly; LingTai skills should remain thin discovery pointers.
+
 ## Tools
 
 One omnibus MCP tool: `feishu(action=...)`. Actions: `send`, `check`, `read`, `reply`, `search`, `delete`, `edit`, `contacts`, `add_contact`, `remove_contact`, `accounts`. Compound message IDs: `account_alias:chat_id:feishu_message_id`.
