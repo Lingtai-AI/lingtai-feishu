@@ -183,4 +183,4 @@ The report counts accounts, inbox/sent `message.json` files, attachment files, v
 
 ## License
 
-MIT.
+Apache-2.0.
