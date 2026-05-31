@@ -309,7 +309,7 @@ Use the `feishu` tool with actions: `send`, `check`, `read`, `reply`, `search`,
 Compound message IDs have the form `account_alias:chat_id:feishu_message_id`.
 
 Voice messages received from Feishu are downloaded and transcribed locally with
-faster-whisper when the `voice` extra is installed. For long-running responses,
+the required faster-whisper dependency. For long-running responses,
 `send` accepts `placeholder=true` to post an immediate placeholder that `edit`
 can later replace.
 """
@@ -353,8 +353,9 @@ the WebSocket connection is healthy, and `allowed_users` includes the sender's
 
 ## Voice messages are not transcribed
 
-Install the optional `voice` extra (`pip install lingtai-feishu[voice]`) to
-enable local faster-whisper transcription.
+`faster-whisper` is a required dependency of `lingtai-feishu`. If it is
+missing, reinstall or upgrade `lingtai-feishu` in the runtime venv, then refresh
+the MCP.
 
 ## Agent-facing vs human-facing interface
 

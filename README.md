@@ -43,12 +43,7 @@ Audio/voice messages received from Feishu are automatically:
 2. Transcribed locally using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (no external API key needed)
 3. Delivered as text in the LICC inbox event
 
-Voice transcription requires the `voice` extra:
-```bash
-pip install lingtai-feishu[voice]
-```
-
-The transcript replaces the empty text in the payload, and metadata includes `is_voice_transcript: true`, `voice_duration`, and `voice_transcript` (with language, segments, etc.).
+Voice transcription is part of the default install; `faster-whisper` is a required dependency rather than an optional runtime install. The transcript replaces the empty text in the payload, and metadata includes `is_voice_transcript: true`, `voice_duration`, and `voice_transcript` (with language, segments, etc.).
 
 ### Rich Feedback
 
@@ -175,7 +170,7 @@ The report counts accounts, inbox/sent `message.json` files, attachment files, v
 - **`Feishu config not found`** — the path resolves but no file exists. Relative paths are resolved against `LINGTAI_AGENT_DIR`.
 - **`coroutine 'Client._connect' was never awaited` warning** — usually means invalid `app_id`/`app_secret`. The lark SDK fails the WebSocket handshake; tool calls still work for actions that don't require live connection (like `accounts`, `check` of cached state).
 - **Server boots but no inbound messages** — your app needs `im:message` and `im:message:send_as_bot` scopes in the Feishu Open Platform console. After enabling, re-publish the version.
-- **Voice messages arrive but aren't transcribed** — ensure `faster-whisper` is installed (`pip install lingtai-feishu[voice]`). Also check that your app has the `im:resource` scope for downloading message resources.
+- **Voice messages arrive but aren't transcribed** — `faster-whisper` is installed with `lingtai-feishu`; if it is missing, reinstall/upgrade `lingtai-feishu` in the runtime venv. Also check that your app has the `im:resource` scope for downloading message resources.
 - **Reactions fail silently** — your app needs `im:message.reactions:write` scope. Check logs for "Failed to add" warnings.
 - **Edit/delete actions return errors** — your app needs `im:message:patch` (edit) and/or `im:message:delete` scopes respectively.
 - **MCP server failed to start** — usually the `command` path in `init.json` doesn't have `lingtai_feishu` installed. Confirm with `<command> -m lingtai_feishu --help` from a shell.
