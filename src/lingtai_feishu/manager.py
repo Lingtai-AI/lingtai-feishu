@@ -15,8 +15,6 @@ import json
 import logging
 import os
 import re
-import subprocess
-import sys
 import tempfile
 import threading
 from collections import OrderedDict
@@ -172,13 +170,11 @@ def _get_whisper_model(model_name: str) -> Any:
     if model_name not in _whisper_model_cache:
         try:
             from faster_whisper import WhisperModel
-        except ImportError:
-            # Install faster-whisper
-            log.warning("faster-whisper not installed, attempting auto-install...")
-            subprocess.check_call([
-                sys.executable, "-m", "pip", "install", "faster-whisper"
-            ])
-            from faster_whisper import WhisperModel
+        except ImportError as e:
+            raise RuntimeError(
+                "faster-whisper is required for Feishu voice transcription; "
+                "reinstall lingtai-feishu so its required dependencies are present"
+            ) from e
         _whisper_model_cache[model_name] = WhisperModel(
             model_name, device="cpu", compute_type="int8"
         )
