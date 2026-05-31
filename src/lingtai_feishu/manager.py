@@ -88,8 +88,12 @@ class TypingIndicatorManager:
                           account.alias, chat_id, e)
                 return None
 
-    def stop_typing(self, account: Any, chat_id: str) -> None:
-        """Delete the typing feedback message for a chat."""
+    def stop_typing(self, account: Any, chat_id: str) -> bool:
+        """Delete the typing feedback message for a chat.
+
+        Returns True when an active typing entry existed and deletion was
+        attempted, even if the best-effort delete call itself failed.
+        """
         key = (account.alias, chat_id)
         with self._lock:
             info = self._active_chats.pop(key, None)
@@ -99,6 +103,8 @@ class TypingIndicatorManager:
             except Exception as e:
                 log.debug("Failed to delete typing message for %s:%s: %s",
                           account.alias, chat_id, e)
+            return True
+        return False
 
     def stop_typing_by_receive(
         self, account: Any, receive_id: str, receive_id_type: str,
@@ -1145,9 +1151,18 @@ class FeishuManager:
             return {"status": "sent", "message_id": new_compound}
         finally:
             # Always clean up typing indicator, even if reply_text or
-            # downstream logic throws. _chat_id comes from parsing the
-            # compound_id so it's always available.
-            _typing_manager.stop_typing(acct, _chat_id)
+            # downstream logic throws. Some historical compound IDs can have
+            # an empty chat_id segment, leaving no usable cleanup key.
+            if not _chat_id:
+                log.debug(
+                    "Skipping reply typing cleanup with no chat_id for %s",
+                    compound_id,
+                )
+            elif not _typing_manager.stop_typing(acct, _chat_id):
+                log.debug(
+                    "No reply typing indicator found for %s:%s:%s",
+                    alias, _chat_id, feishu_msg_id,
+                )
 
     def _search(self, args: dict) -> dict:
         query = args.get("query", "")

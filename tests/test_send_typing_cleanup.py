@@ -7,6 +7,7 @@ the underlying `TypingIndicatorManager` fallback behavior.
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -25,12 +26,21 @@ from lingtai_feishu.manager import (  # noqa: E402
 class FakeAccount:
     """Minimal stand-in for FeishuAccount used by typing cleanup."""
 
-    def __init__(self, alias: str = "acct1", *, send_result: dict | None = None,
-                 send_raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        alias: str = "acct1",
+        *,
+        send_result: dict | None = None,
+        send_raises: Exception | None = None,
+        reply_result: dict | None = None,
+    ) -> None:
         self.alias = alias
         self._send_result = send_result or {}
         self._send_raises = send_raises
+        self._reply_result = reply_result or {}
         self.sent_texts: list[tuple[str, str, str]] = []
+        self.replies: list[tuple[str, str]] = []
+        self.reactions: list[tuple[str, str]] = []
         self.deleted_messages: list[str] = []
 
     def send_text(self, receive_id: str, receive_id_type: str, text: str) -> dict:
@@ -41,6 +51,14 @@ class FakeAccount:
 
     def delete_message(self, message_id: str) -> bool:
         self.deleted_messages.append(message_id)
+        return True
+
+    def reply_text(self, message_id: str, text: str) -> dict:
+        self.replies.append((message_id, text))
+        return self._reply_result
+
+    def add_reaction(self, message_id: str, reaction: str) -> bool:
+        self.reactions.append((message_id, reaction))
         return True
 
 
@@ -140,6 +158,32 @@ def test_stop_typing_by_receive_is_best_effort_when_delete_fails():
     tm.stop_typing_by_receive(acct, "ou_alice", "open_id")
     # Entry still popped despite delete failure.
     assert ("acct1", "oc_chat_A") not in tm._active_chats
+
+
+def test_stop_typing_returns_true_when_entry_was_deleted():
+    tm = TypingIndicatorManager()
+    acct = FakeAccount()
+    tm._active_chats[("acct1", "oc_chat_A")] = {
+        "message_id": "om_A",
+        "receive_id": "ou_alice",
+        "receive_id_type": "open_id",
+    }
+
+    found = tm.stop_typing(acct, "oc_chat_A")
+
+    assert found is True
+    assert acct.deleted_messages == ["om_A"]
+    assert ("acct1", "oc_chat_A") not in tm._active_chats
+
+
+def test_stop_typing_returns_false_when_no_entry_exists():
+    tm = TypingIndicatorManager()
+    acct = FakeAccount()
+
+    found = tm.stop_typing(acct, "oc_missing")
+
+    assert found is False
+    assert acct.deleted_messages == []
 
 
 # --------------------------------------------------------------------
@@ -264,3 +308,69 @@ def test_send_failure_no_active_typing_does_not_raise(tmp_path: Path):
 
     assert "error" in result
     assert acct.deleted_messages == []
+
+
+# --------------------------------------------------------------------
+# _reply cleanup behavior — issue #7 regression
+# --------------------------------------------------------------------
+
+
+def test_reply_with_empty_chat_id_skips_typing_cleanup(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    acct = FakeAccount(reply_result={
+        "message_id": "om_reply",
+        "chat_id": "oc_returned_chat",
+    })
+    fm = _make_manager(tmp_path, acct)
+    manager_mod._typing_manager._active_chats[(acct.alias, "oc_returned_chat")] = {
+        "message_id": "om_typing",
+        "receive_id": "oc_returned_chat",
+        "receive_id_type": "chat_id",
+    }
+
+    with caplog.at_level(logging.DEBUG, logger="lingtai_feishu.manager"):
+        result = fm.handle({
+            "action": "reply",
+            "message_id": f"{acct.alias}::om_original",
+            "text": "hello",
+        })
+
+    assert result == {
+        "status": "sent",
+        "message_id": f"{acct.alias}:oc_returned_chat:om_reply",
+    }
+    assert acct.replies == [("om_original", "hello")]
+    assert acct.deleted_messages == []
+    assert (acct.alias, "oc_returned_chat") in (
+        manager_mod._typing_manager._active_chats
+    )
+    assert "Skipping reply typing cleanup with no chat_id" in caplog.text
+
+
+def test_reply_logs_when_no_typing_indicator_found(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    acct = FakeAccount(reply_result={
+        "message_id": "om_reply",
+        "chat_id": "oc_chat_A",
+    })
+    fm = _make_manager(tmp_path, acct)
+
+    with caplog.at_level(logging.DEBUG, logger="lingtai_feishu.manager"):
+        result = fm.handle({
+            "action": "reply",
+            "message_id": f"{acct.alias}:oc_chat_A:om_original",
+            "text": "hello",
+        })
+
+    assert result == {
+        "status": "sent",
+        "message_id": f"{acct.alias}:oc_chat_A:om_reply",
+    }
+    assert acct.deleted_messages == []
+    assert "No reply typing indicator found for acct1:oc_chat_A:om_original" in (
+        caplog.text
+    )
