@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -506,4 +508,19 @@ class FeishuAccount:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {"bot_info": self._bot_info}
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        fd, tmp = tempfile.mkstemp(
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise
