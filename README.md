@@ -52,6 +52,18 @@ Voice transcription is part of the default install; `faster-whisper` is a requir
 - **Typing indicator**: A temporary "⏳ ..." message is sent immediately on message receipt and automatically deleted when the agent's response is sent.
 - **Placeholder mode**: Send a placeholder message immediately and edit it later with the final content. Use `feishu(action="send", placeholder=true, ...)` to get back a compound message_id, then `feishu(action="edit", message_id=..., text=<final>)` to update it.
 
+## Public MCP identity metadata
+
+On successful startup, `lingtai-feishu` writes a non-secret identity document to:
+
+```text
+<agent_dir>/system/mcp_identities/feishu.json
+```
+
+This file maps local account aliases to non-secret Feishu app identity fields such as `app_id`, `last_verified_at`, `allowed_users_count`, and `contact_count`. It never contains `app_secret`, message contents, individual allowed-user/open IDs, chat IDs, webhook secrets, or encryption keys. Agents can use it to answer questions like “which local LingTai agent owns this Feishu app?” without inspecting `.secrets/feishu.json` or mining logs.
+
+`feishu(action="accounts")` also returns the same non-secret `details` list plus `identity_path` for live inspection.
+
 ## Inbound messages (LICC)
 
 Inbound Feishu events flow into the host agent's inbox via the LingTai Inbox Callback Contract. Each new message is delivered as a LICC event with:

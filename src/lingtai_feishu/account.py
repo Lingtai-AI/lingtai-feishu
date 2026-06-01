@@ -13,6 +13,7 @@ import logging
 import os
 import tempfile
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -137,6 +138,7 @@ class FeishuAccount:
         self._rest_client: Any = None
         self._stop_event = threading.Event()
         self._bot_info: dict | None = None
+        self._last_verified_at: str | None = None
 
         self._load_state()
 
@@ -161,6 +163,7 @@ class FeishuAccount:
 
         # Store minimal bot info — full bot info API path varies by SDK version
         self._bot_info = {"app_id": self._app_id}
+        self._last_verified_at = datetime.now(timezone.utc).isoformat()
         self._save_state()
 
         # Event handler
@@ -483,6 +486,28 @@ class FeishuAccount:
             )
         return True
 
+    @property
+    def allowed_users_count(self) -> int | None:
+        """Return the allow-list size without exposing user IDs."""
+        if self._allowed_users is None:
+            return None
+        return len(self._allowed_users)
+
+    def public_identity(self) -> dict[str, Any]:
+        """Non-secret Feishu app identity observed from config/state.
+
+        This intentionally exposes only stable public app metadata. It never
+        includes app secrets, individual open_ids/user_ids, chat IDs, messages,
+        or webhook/encryption secrets.
+        """
+        info = self._bot_info or {}
+        identity = {
+            "alias": self.alias,
+            "app_id": info.get("app_id") or self._app_id,
+            "last_verified_at": self._last_verified_at,
+        }
+        return {k: v for k, v in identity.items() if v is not None}
+
     # ------------------------------------------------------------------
     # State persistence
     # ------------------------------------------------------------------
@@ -499,6 +524,7 @@ class FeishuAccount:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             self._bot_info = data.get("bot_info")
+            self._last_verified_at = data.get("last_verified_at")
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load Feishu state: %s", e)
 
@@ -507,7 +533,10 @@ class FeishuAccount:
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"bot_info": self._bot_info}
+        data = {
+            "bot_info": self._bot_info,
+            "last_verified_at": self._last_verified_at,
+        }
         fd, tmp = tempfile.mkstemp(
             dir=str(path.parent),
             prefix=f".{path.name}.",

@@ -623,6 +623,7 @@ def build_manager() -> tuple[FeishuManager, Path]:
         working_dir=working_dir,
         accounts_config=accounts,
         on_message=lambda alias, ctx: mgr_ref[0].on_incoming(alias, ctx),
+        config_source=os.environ.get("LINGTAI_FEISHU_CONFIG"),
     )
 
     mgr = FeishuManager(
