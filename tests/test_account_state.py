@@ -22,6 +22,7 @@ def test_save_state_writes_json_atomically(tmp_path):
     assert state_path.read_text(encoding="utf-8").endswith("\n")
     assert json.loads(state_path.read_text(encoding="utf-8")) == {
         "bot_info": {"app_id": "app_id", "name": "Test Bot"},
+        "last_verified_at": None,
     }
     assert list(tmp_path.glob(".state.json.*.tmp")) == []
 

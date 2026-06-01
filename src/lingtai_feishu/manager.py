@@ -1263,4 +1263,9 @@ class FeishuManager:
         return {"error": "Contact not found"}
 
     def _accounts(self) -> dict:
-        return {"status": "ok", "accounts": self._service.list_accounts()}
+        return {
+            "status": "ok",
+            "accounts": self._service.list_accounts(),
+            "details": self._service.account_details(),
+            "identity_path": str(self._service.identity_path()),
+        }
