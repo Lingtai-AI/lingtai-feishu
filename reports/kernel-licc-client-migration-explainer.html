@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>lingtai-feishu: prefer kernel LICC client</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; line-height: 1.55; color: #1f2937; }
+main { max-width: 920px; margin: 0 auto; }
+h1 { margin-bottom: .25rem; }
+.kicker { color: #6b7280; margin-top: 0; }
+.card { border: 1px solid #d1d5db; border-radius: 12px; padding: 1rem 1.25rem; margin: 1rem 0; background: #f9fafb; }
+.ok { color: #047857; font-weight: 600; }
+.warn { color: #b45309; font-weight: 600; }
+code { background: #eef2ff; padding: .1rem .25rem; border-radius: 4px; }
+ul { padding-left: 1.4rem; }
+</style>
+</head>
+<body><main>
+<h1>lingtai-feishu: prefer kernel LICC client</h1>
+<p class="kicker">Migration PR prepared for the first-party MCP LICC interface cleanup.</p>
+<section class="card">
+<h2>Conclusion</h2>
+<p><span class="ok">Ready for review.</span> This PR keeps the addon-compatible <code>lingtai_feishu.licc.push_inbox_event</code> import path, but delegates to the canonical kernel helper <code>lingtai.core.mcp.licc.push_inbox_event</code> whenever the host LingTai runtime provides it.</p>
+</section>
+<section class="card">
+<h2>What changed</h2>
+<ul>
+<li>Replaced the purely vendored LICC writer with a compatibility wrapper.</li>
+<li>Added a local fallback so standalone development and older runtime environments continue to work before the kernel PR/release is available.</li>
+<li>Updated README wording so the kernel helper is documented as canonical and this repo's <code>licc.py</code> is documented as a compatibility wrapper.</li>
+<li>Added focused tests for kernel delegation and fallback event writing.</li>
+</ul>
+</section>
+<section class="card">
+<h2>Risk controls</h2>
+<ul>
+<li>No runtime configuration changes.</li>
+<li>No hard <code>lingtai</code> package dependency added, avoiding a packaging dependency cycle while the kernel package still depends on first-party MCP addons.</li>
+<li>If the canonical helper is unavailable, behavior falls back to the same LICC v1 filesystem contract.</li>
+<li>No merge should happen tonight; Jason explicitly asked to prepare these PRs for tomorrow's review/migration window.</li>
+</ul>
+</section>
+<section class="card">
+<h2>Validation</h2>
+<p>Run locally before opening PR:</p>
+<ul>
+<li><code>python -m pytest tests/test_licc_wrapper.py -q</code></li>
+<li><code>python -m compileall src/lingtai_feishu/licc.py tests/test_licc_wrapper.py</code></li>
+<li><code>git diff --check</code></li>
+</ul>
+</section>
+<section class="card">
+<h2>Dependency</h2>
+<p class="warn">Operationally depends on kernel PR #229</p>
+<p>The addon can merge independently because of the fallback, but it will only use the canonical kernel helper when running with a LingTai kernel version that includes <code>lingtai.core.mcp.licc</code>.</p>
+</section>
+</main></body>
+</html>

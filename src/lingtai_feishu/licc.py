@@ -1,15 +1,13 @@
-"""LICC v1 client helper — push events into the host agent's inbox.
+"""LICC v1 client compatibility wrapper.
 
-Vendored verbatim into each LingTai MCP server. The kernel side of this
-contract lives in lingtai-kernel/src/lingtai/core/mcp/inbox.py.
+The canonical first-party LICC producer implementation lives in
+``lingtai.core.mcp.licc`` inside lingtai-kernel. This module keeps the
+addon's historical ``.lingtai_feishu.licc.push_inbox_event`` import path stable
+while preferring the kernel implementation whenever it is available.
 
-Two env vars must be set by the kernel when spawning this MCP:
-    LINGTAI_AGENT_DIR  — absolute path of the agent's working directory.
-    LINGTAI_MCP_NAME   — the MCP's registry name.
-
-Both are injected automatically by lingtai-kernel's MCP loader. If they
-are missing (e.g., running this MCP outside LingTai), push_inbox_event
-becomes a no-op and logs a warning.
+A small local fallback remains for standalone development or pre-upgrade
+runtime environments where the host kernel does not yet expose the canonical
+client helper. The fallback writes the same LICC v1 filesystem event shape.
 """
 from __future__ import annotations
 
@@ -21,11 +19,17 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:  # pragma: no cover - availability depends on the host LingTai runtime.
+    from lingtai.core.mcp.licc import push_inbox_event as _kernel_push_inbox_event
+except ImportError:  # Older/standalone environments keep using the fallback below.
+    _kernel_push_inbox_event = None
+
 log = logging.getLogger(__name__)
 
 LICC_VERSION = 1
 INBOX_DIRNAME = ".mcp_inbox"
 TMP_SUFFIX = ".json.tmp"
+EVENT_SUFFIX = ".json"
 
 
 def push_inbox_event(
@@ -38,18 +42,43 @@ def push_inbox_event(
 ) -> bool:
     """Write a LICC event into the host agent's inbox.
 
-    Returns True on success, False if the env vars are missing or the
-    write fails. Never raises — designed to be safe inside listener
-    callbacks where exceptions would silently kill the listener thread.
+    In a current LingTai runtime, delegate to the canonical kernel helper.
+    If the helper is unavailable, use the local compatibility fallback so
+    older hosts and standalone development remain functional.
     """
+    if _kernel_push_inbox_event is not None:
+        return _kernel_push_inbox_event(
+            sender,
+            subject,
+            body,
+            metadata=metadata,
+            wake=wake,
+        )
+    return _fallback_push_inbox_event(
+        sender,
+        subject,
+        body,
+        metadata=metadata,
+        wake=wake,
+    )
+
+
+def _fallback_push_inbox_event(
+    sender: str,
+    subject: str,
+    body: str,
+    *,
+    metadata: dict | None = None,
+    wake: bool = True,
+) -> bool:
+    """Local LICC v1 writer used only when the kernel helper is unavailable."""
     agent_dir = os.environ.get("LINGTAI_AGENT_DIR")
     mcp_name = os.environ.get("LINGTAI_MCP_NAME")
 
     if not agent_dir or not mcp_name:
         log.warning(
             "LICC: LINGTAI_AGENT_DIR and/or LINGTAI_MCP_NAME not set; "
-            "running outside a LingTai host? Event dropped: %s / %s",
-            sender, subject,
+            "event dropped"
         )
         return False
 
@@ -68,16 +97,20 @@ def push_inbox_event(
         target_dir.mkdir(parents=True, exist_ok=True)
         event_id = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
         tmp = target_dir / f"{event_id}{TMP_SUFFIX}"
-        final = target_dir / f"{event_id}.json"
-        # Write + fsync + atomic rename so the host poller never sees a
+        final = target_dir / f"{event_id}{EVENT_SUFFIX}"
+        # Write + fsync + atomic replace so the host poller never sees a
         # half-written file.
         text = json.dumps(event, ensure_ascii=False)
         with tmp.open("w", encoding="utf-8") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        tmp.rename(final)
+        os.replace(tmp, final)
         return True
-    except OSError as e:
-        log.error("LICC: failed to write event for %s: %s", mcp_name, e)
+    except (OSError, TypeError, ValueError) as exc:
+        log.error(
+            "LICC: failed to write event for MCP %r via compatibility fallback: %s",
+            mcp_name,
+            type(exc).__name__,
+        )
         return False

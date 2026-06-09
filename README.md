@@ -4,7 +4,7 @@ LingTai Feishu/Lark MCP server — Open API client with multi-account support an
 
 This is the canonical setup, configuration, and troubleshooting doc for the `lingtai-feishu` MCP. It is fetched by LingTai agents (or anyone else) when they need to install or configure this server.
 
-> **MCP / LICC contract spec:** see the `lingtai-anatomy` skill, `reference/mcp-protocol.md`, for the canonical specification of the catalog → registry → activation chain, environment-variable injection, and the LICC v1 inbox callback protocol. The reference client implementation is `src/lingtai_feishu/licc.py` in this repo (vendored verbatim into all first-party LingTai MCP repos — copy it if you're writing your own).
+> **MCP / LICC contract spec:** see the `lingtai-anatomy` skill, `reference/mcp-protocol.md`, for the canonical specification of the catalog → registry → activation chain, environment-variable injection, and the LICC v1 inbox callback protocol. The canonical client implementation is `lingtai.core.mcp.licc.push_inbox_event` in `lingtai-kernel`; `src/lingtai_feishu/licc.py` in this repo is a compatibility wrapper that delegates to the kernel helper when available and falls back to the LICC v1 filesystem writer for standalone or pre-upgrade environments.
 
 ## LingTai profile resources
 
