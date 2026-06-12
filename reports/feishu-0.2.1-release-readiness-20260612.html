@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>lingtai-feishu 0.2.1 release readiness</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.55;margin:32px;color:#1f2937;background:#fafafa}main{max-width:980px;margin:auto;background:white;padding:28px;border-radius:14px;box-shadow:0 1px 8px #0001}h1{margin-top:0}.ok{color:#047857;font-weight:700}.warn{color:#b45309;font-weight:700}code{background:#f3f4f6;padding:2px 5px;border-radius:4px}table{border-collapse:collapse;width:100%;margin:16px 0}td,th{border:1px solid #e5e7eb;padding:8px;text-align:left}th{background:#f9fafb}</style>
+</head>
+<body><main>
+<h1>lingtai-feishu 0.2.1 release readiness</h1>
+<p><strong>Conclusion:</strong> bump <code>lingtai-feishu</code> from <code>0.2.0</code> to <code>0.2.1</code> so PyPI can publish the already-merged WebSocket event-loop fix.</p>
+<h2>Why this is needed</h2>
+<ul>
+  <li>Issue #25 reports Feishu WebSocket startup failing with <code>This event loop is already running</code>.</li>
+  <li>The fix already exists on <code>main</code> via PR #18: the WebSocket thread gets its own asyncio loop and the SDK module-global loop is mediated by <code>_ThreadLocalLoop</code>.</li>
+  <li>PyPI latest is still <code>0.2.0</code>, uploaded before PR #18, so users installing from PyPI still receive stale pre-fix code.</li>
+</ul>
+<h2>Change</h2>
+<table><tr><th>File</th><th>Change</th></tr><tr><td><code>pyproject.toml</code></td><td>Version <code>0.2.0</code> → <code>0.2.1</code>.</td></tr></table>
+<h2>Validation plan</h2>
+<ul>
+  <li><code>git diff --check</code></li>
+  <li><code>python -m py_compile src/lingtai_feishu/account.py</code></li>
+  <li>Focused tests: <code>tests/test_ws_event_loop.py</code></li>
+  <li>Full addon test suite if time permits.</li>
+</ul>
+<p class="warn">Publishing note: the repository publishes to PyPI on <code>v*</code> tag push via trusted publishing. Do not create/push the release tag until Jason explicitly approves the release step.</p>
+</main></body></html>
